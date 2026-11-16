@@ -106,7 +106,9 @@ class Board:
         d = self.d
         for p in d["pads"]:
             n = self.ni.get(p["net"], NO_NET) if p["net"] else NO_NET
-            c = max(p.get("clearance", 0.0), self.net_clr(n))
+            # the pad's own clearance (its overrides included): KiCad keeps the larger of the
+            # two items' clearances, and the router's threshold adds the track's side
+            c = p.get("clearance") or self.net_clr(n)
             for ln, rings in p["shapes"].items():
                 if ln in self.li:
                     self.items.append((self.li[ln], poly_of(rings), n, c))

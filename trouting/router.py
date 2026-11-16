@@ -44,6 +44,7 @@ class Options:
     plane_layer_cost = 2.5   # tracks on a plane layer cut the plane
     pres0 = 0.5              # first round's penalty per other net in the way
     pres_mult = 1.6
+    pres_max = 1000.0
     hist_add = 0.3
     max_rounds = 60
     near = 3.0               # mm the first search looks beyond its ends
@@ -61,7 +62,12 @@ class Router:
         self.tw = sorted({r["width"] for r in rules}) or [0.25]
         self.vd = sorted({r["via_d"] for r in rules}) or [0.6]
         self.K = len(self.tw) + len(self.vd)
-        half = [w / 2 for w in self.tw] + [v / 2 for v in self.vd]
+        # a via keeps the copper clearance from its pad and the hole clearance from its
+        # drill, whichever reaches further (for low-clearance nets, the drill's)
+        hole_clr = b.hole_clr
+        drill = {v: max([r["via_drill"] for r in rules if r["via_d"] == v] + [0.0]) for v in self.vd}
+        self.via_reach = {v: max(v / 2, drill[v] / 2 + hole_clr - b.c_ref) for v in self.vd}
+        half = [w / 2 for w in self.tw] + [self.via_reach[v] for v in self.vd]
         cmax = [0.0] * self.K
         for r in rules:
             for k in (self.tw.index(r["width"]), len(self.tw) + self.vd.index(r["via_d"])):
@@ -71,10 +77,14 @@ class Router:
             c = r["clearance"]
             extra = max(0.0, c - b.c_ref)
             rt = [(r["width"] / 2 + max(c, cmax[k]) + half[k] + MARGIN) / res for k in range(self.K)]
-            rv = [(r["via_d"] / 2 + max(c, cmax[k]) + half[k] + MARGIN) / res for k in range(self.K)]
+            # (the via's drill against another net's track: its reach already counts the
+            # hole clearance, so use the smaller copper term there)
+            rv = [(max(r["via_d"] / 2 + max(c, cmax[k]), r["via_drill"] / 2 + hole_clr) + half[k] + MARGIN) / res
+                  for k in range(self.K)]
             self.per.append({
                 "kt": self.tw.index(r["width"]), "kv": len(self.tw) + self.vd.index(r["via_d"]),
-                "thr": r["width"] / 2 + extra + MARGIN, "vthr": r["via_d"] / 2 + extra + MARGIN,
+                "thr": r["width"] / 2 + extra + MARGIN,
+                "vthr": max(r["via_d"] / 2 + extra, r["via_drill"] / 2 + hole_clr - b.c_ref) + MARGIN,
                 "rt": rt, "rv": rv,
             })
         lc = [self.o.plane_layer_cost if l in b.plane_layers else 1.0 for l in range(b.L)]
@@ -164,6 +174,14 @@ class Router:
                 sl = slice(l * b.WH, (l + 1) * b.WH)
                 ok = np.where(b.n1[sl] == n, b.d2[sl], b.d1[sl]) >= self.per[n]["thr"]
                 self.side_mask[(n, l)] = (m & ok).reshape(b.H, b.W)
+        # plane nets: which terminal a cell belongs to (a stub joins its own pad to the plane)
+        self.term_of_cell = {}
+        for n in self.plane_mask:
+            m = {}
+            for ti, t in enumerate(b.terminals[n]):
+                for v in t["cells"]:
+                    m[int(v)] = ti
+            self.term_of_cell[n] = m
         self.paths = {}          # net -> list of node arrays
         self.failed = {}         # net -> list of terminals it couldn't reach
         self.stamped = set()
@@ -289,10 +307,16 @@ class Router:
             pl, mask = self.plane_mask[n]
             mask = self.main_island(n)
             good = self.joined_to_plane(n, kept, mask) if keep else set()
-            for t in terms:
-                if self.in_island(t, pl, mask) or any(int(v) in good for v in t["cells"]):
-                    continue
-                done = np.concatenate(paths + kept) if paths or kept else np.zeros(0, np.int32)
+            joined = [t["cells"] for t in terms
+                      if self.in_island(t, pl, mask) or any(int(v) in good for v in t["cells"])]
+            todo = [t for t in terms if not (self.in_island(t, pl, mask) or any(int(v) in good for v in t["cells"]))]
+            # nearest to something joined first: then a pad can join a neighbour already joined
+            # (a short track) instead of taking a via of its own
+            while todo:
+                jat = np.array([t["at"] for t in terms if any(np.array_equal(t["cells"], j) for j in joined)] or [[0, 0]])
+                t = min(todo, key=lambda t: float(np.min(np.hypot(*(jat - t["at"]).T))))
+                todo.remove(t)
+                done = np.concatenate(paths + kept + joined) if paths or kept or joined else np.zeros(0, np.int32)
                 for grow in (o.near, 4 * o.near, None):
                     box = self.full() if grow is None else self.bbox_of(t["cells"], grow)
                     x0, y0, x1, y1 = max(box[0], 0), max(box[1], 0), min(box[2], b.W - 1), min(box[3], b.H - 1)
@@ -306,6 +330,7 @@ class Router:
                                            [x0, y0, x1, y1], [x0, y0, x1, y1], pres)
                     if path is not None:
                         paths.append(path)
+                        joined.append(t["cells"])
                         break
                 else:
                     failed.append(t)
@@ -460,7 +485,11 @@ class Router:
         (or on a stub that does)."""
         b = self.b
         pl = self.plane_mask[n][0]
+        terms = b.terminals[n]
         good = set((np.nonzero(island.ravel())[0] + pl * b.WH).tolist())
+        for t in terms:
+            if self.in_island(t, pl, island):
+                good.update(int(v) for v in t["cells"])
         pending = list(range(len(paths)))
         changed = True
         while changed and pending:
@@ -468,6 +497,9 @@ class Router:
             for i in list(pending):
                 if int(paths[i][-1]) in good:
                     good.update(int(v) for v in paths[i])
+                    ti = self.term_of_cell[n].get(int(paths[i][0]))
+                    if ti is not None:                  # the pad it starts from is joined now
+                        good.update(int(v) for v in terms[ti]["cells"])
                     pending.remove(i)
                     changed = True
         return good
@@ -534,7 +566,8 @@ class Router:
             hot = []
             for n in bad:
                 hot.append(self.conflicts(n, o.hist_add))
-            pres *= o.pres_mult
+            # capped: beyond this, float32 path costs lose the step lengths (and at 1.6^200, overflow)
+            pres = min(pres * o.pres_mult, o.pres_max)
             todo = sorted(set(bad) | self.near_nets(np.concatenate(hot), o.neighbour), key=span)
         self.settle()
         return self

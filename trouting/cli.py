@@ -1,0 +1,193 @@
+"""trouting: route a KiCad board.
+
+    trouting board.kicad_pcb                 route it in place (a backup is kept)
+    trouting board.kicad_pcb -o routed.kicad_pcb
+    trouting board.kicad_pcb --keep-tracks   route only what isn't routed yet
+
+Several router setups run at once (one per core, up to --tries) and the best
+result is kept: fewest unrouted connections, then fewest vias, then the
+shortest copper. KiCad's DRC is run on the result and compared with the board
+as it was.
+"""
+import argparse
+import json
+import multiprocessing as mp
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+KICAD_SIDE = os.path.join(HERE, "trouting_kicad.py")
+
+# the portfolio: (via cost, plane layer cost); cheap vias first, they won most tests
+SETUPS = [(8.0, 2.5), (8.0, 1.5), (11.0, 2.5), (6.0, 2.5), (10.0, 1.5), (13.0, 2.5),
+          (7.0, 1.5), (15.0, 2.5), (9.0, 2.0), (12.0, 1.5), (5.0, 2.0), (8.0, 1.0)]
+
+
+# ---- KiCad: its Python (snap or system) and kicad-cli ----
+def kicad():
+    """How to run a script under KiCad's Python, a work dir it can see, and kicad-cli."""
+    try:
+        subprocess.run([sys.executable, "-c", "import pcbnew"], check=True, capture_output=True)
+        py = [sys.executable]
+        work = tempfile.mkdtemp(prefix="trouting-")
+        cli = shutil.which("kicad-cli")
+    except subprocess.CalledProcessError:
+        if not shutil.which("snap") or not os.path.exists("/snap/bin/kicad"):
+            sys.exit("trouting: can't find KiCad's Python (pcbnew), neither installed nor as the snap")
+        py = None                                   # through snap run
+        # the snap sees only its own common dir and non-hidden home dirs
+        base = os.path.expanduser("~/snap/kicad/common/trouting")
+        os.makedirs(base, exist_ok=True)
+        work = tempfile.mkdtemp(prefix="run-", dir=base)
+        cli = "/snap/bin/kicad.kicad-cli"
+    return py, work, cli
+
+
+def run_kicad(py, args, timeout=600):
+    if py:
+        cmd = py + [KICAD_SIDE] + args
+    else:
+        q = " ".join("'%s'" % a.replace("'", "'\\''") for a in [KICAD_SIDE] + args)
+        cmd = ["snap", "run", "--shell", "kicad", "-c", "python3 " + q]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    out = [l for l in (r.stdout + r.stderr).splitlines()
+           if l.strip() and not re.match(r"(\d\d:\d\d:\d\d: Debug|swig/python detected)", l)]
+    if r.returncode != 0:
+        sys.exit("trouting: KiCad step failed (%s):\n  %s" % (args[0], "\n  ".join(out[-10:])))
+    return out
+
+
+def drc(cli, pcb, work, name):
+    """{violation type: count} and the number of unconnected pads, by KiCad's DRC."""
+    if not cli:
+        return None, None
+    rpt = os.path.join(work, name + "-drc.txt")
+    subprocess.run([cli, "pcb", "drc", "-o", rpt, pcb], capture_output=True)
+    if not os.path.exists(rpt):
+        return None, None
+    txt = open(rpt).read()
+    counts = {}
+    for m in re.finditer(r"^\[(\w+)\]", txt, re.M):
+        counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+    m = re.search(r"Found (\d+) unconnected", txt)
+    return counts, int(m.group(1)) if m else None
+
+
+# ---- routing, several setups at once ----
+_BOARD = None
+
+
+def _route(setup):
+    from .router import Options, Router
+    via_cost, plane_cost = setup
+    o = Options()
+    o.via_cost, o.plane_layer_cost = via_cost, plane_cost
+    o.log = lambda *a: None
+    t = time.time()
+    r = Router(_BOARD, o).run()
+    out = r.result()
+    length = sum(((t_["a"][0] - t_["b"][0]) ** 2 + (t_["a"][1] - t_["b"][1]) ** 2) ** 0.5 for t_ in out["tracks"])
+    n_unrouted = len(out["unrouted"])
+    hot = [[float(_BOARD.cx(v % _BOARD.WH % _BOARD.W)), float(_BOARD.cy(v % _BOARD.WH // _BOARD.W))]
+           for h in r.hot for v in h[:1]]
+    return {"setup": setup, "out": out, "unrouted": n_unrouted, "vias": len(out["vias"]),
+            "length": round(length, 1), "hot": hot, "rounds": len(r.history), "secs": round(time.time() - t, 1),
+            "stitches": getattr(r, "stitches", 0)}
+
+
+def route_portfolio(board_json, tries, jobs, log):
+    global _BOARD
+    from .board import Board
+    t = time.time()
+    _BOARD = Board(json.load(open(board_json)))
+    log("board read: %d x %d cells x %d layers, %d nets to join (%.1fs)"
+        % (_BOARD.W, _BOARD.H, _BOARD.L, sum(1 for ts in _BOARD.terminals.values() if len(ts) > 1), time.time() - t))
+    setups = SETUPS[:tries]
+    ctx = mp.get_context("fork")                 # the workers share the board read above
+    results = []
+    with ctx.Pool(min(jobs, len(setups))) as pool:
+        for res in pool.imap_unordered(_route, setups):
+            log("  setup via %4.1f, plane %.1f: %2d unrouted, %3d vias, %6.0f mm  (%d rounds, %.0fs)"
+                % (res["setup"] + (res["unrouted"], res["vias"], res["length"], res["rounds"], res["secs"])))
+            results.append(res)
+    results.sort(key=lambda r: (r["unrouted"], r["vias"], r["length"]))
+    return results[0]
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="trouting", description=__doc__.split("\n\n")[0])
+    ap.add_argument("board")
+    ap.add_argument("-o", "--output", help="write here instead of over the board (which then gets a backup)")
+    ap.add_argument("--keep-tracks", action="store_true", help="keep the tracks already there, route the rest")
+    ap.add_argument("--tries", type=int, default=len(SETUPS), help="router setups to try (default %(default)s)")
+    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4, help="at once (default: all cores)")
+    ap.add_argument("--png", help="also draw the result to this PNG")
+    a = ap.parse_args(argv)
+    log = lambda m: print(m, flush=True)
+
+    src = os.path.abspath(a.board)
+    if not os.path.exists(src):
+        sys.exit("trouting: no such board: " + a.board)
+    out = os.path.abspath(a.output) if a.output else src
+    py, work, cli = kicad()
+    t0 = time.time()
+    try:
+        w_src = os.path.join(work, "in.kicad_pcb")
+        shutil.copy(src, w_src)
+        for ext in (".kicad_pro", ".kicad_dru"):        # rules and net classes live here
+            side = os.path.splitext(src)[0] + ext
+            if os.path.exists(side):
+                shutil.copy(side, os.path.join(work, "in" + ext))
+        rip = [] if a.keep_tracks else ["--rip-up"]
+        j = os.path.join(work, "board.json")
+        log("reading %s" % os.path.basename(src))
+        log("  " + run_kicad(py, ["dump", w_src, j] + rip)[-1])
+        before, before_unc = drc(cli, w_src, work, "before")
+
+        best = route_portfolio(j, a.tries, a.jobs, log)
+        routes = os.path.join(work, "routes.json")
+        json.dump(best["out"], open(routes, "w"))
+        w_out = os.path.join(work, "out.kicad_pcb")
+        log("best: via cost %.1f, plane cost %.1f" % best["setup"])
+        log("  " + run_kicad(py, ["apply", w_src, routes, w_out] + rip)[-1])
+        after, after_unc = drc(cli, w_out, work, "after")
+
+        if out == src:
+            bak = src + ".trouting-bak"
+            shutil.copy(src, bak)
+            log("backup: %s" % bak)
+        shutil.copy(w_out, out)
+        log("wrote %s  (%.0fs)" % (out, time.time() - t0))
+        if a.png:
+            log("(--png needs the router in this process; see test/t_route.py)")
+
+        # report
+        u = best["out"]["unrouted"]
+        if u:
+            log("\nnot routed (%d):" % len(u))
+            for x in u:
+                log("  %-24s %s" % (x["net"], ", ".join(x.get("pads", [])) or "(crowded)"))
+            if best["hot"]:
+                log("  crowded at: " + "; ".join("(%.2f, %.2f)" % tuple(h) for h in best["hot"][:6]))
+        else:
+            log("\nall connections routed")
+        if after is not None:
+            log("KiCad DRC: %s unconnected pads (was %s)" % (after_unc, before_unc))
+            skip = ("silk", "lib_footprint", "text_", "unconnected_items")
+            new = {k: v - (before or {}).get(k, 0) for k, v in after.items()
+                   if v > (before or {}).get(k, 0) and not k.startswith(skip)}
+            for k, v in sorted(new.items()):
+                log("  new: %d x %s" % (v, k))
+            if not new:
+                log("  no new violations")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()
