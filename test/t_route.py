@@ -20,3 +20,16 @@ for u in out['unrouted']:
     print('  ', u)
 json.dump(out, open(f'/home/tommy/claude/tracer/test/out/{name}-routes.json', 'w'))
 render(r, f'/home/tommy/claude/tracer/test/out/{name}-routed.png')
+# what the router believes the plane net pours will fill (for comparing with KiCad's)
+import numpy as np
+pred = {}
+for n in r.plane_mask:
+    r.stamp(n, -1)
+    pl = r.plane_mask[n][0]
+    pred[f'{b.net_names[n]}|{b.layers[pl]}'] = r.main_island(n)
+    for (m, l), mask in r.side_mask.items():
+        if m == n:
+            lab, group, _ = r.pour_pieces(n, l, mask)
+            pred[f'{b.net_names[n]}|{b.layers[l]}'] = lab > 0
+    r.stamp(n, +1)
+np.savez_compressed(f'/home/tommy/claude/tracer/test/out/{name}-pred.npz', ox=b.ox, oy=b.oy, res=b.res, W=b.W, H=b.H, **pred)

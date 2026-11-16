@@ -22,6 +22,22 @@ from .board import MARGIN
 from .core import Grid
 
 
+def grow(mask, r):
+    """Cells within r cells (Euclidean) of mask. (ndimage's binary_dilation steps
+    in a diamond, which falls 30 % short on the diagonals.)"""
+    if r <= 0:
+        return mask.copy()
+    return ndimage.distance_transform_edt(~mask) <= r
+
+
+def shrink(mask, r):
+    """Cells of mask at least r cells (Euclidean) inside it (more than r from its edge)."""
+    if r <= 0:
+        return mask.copy()
+    m = np.pad(mask, 1)                   # outside the array counts as outside
+    return (ndimage.distance_transform_edt(m) > r)[1:-1, 1:-1]
+
+
 class Options:
     res = 0.05
     via_cost = 15.0          # cells (x res mm) a via is worth in track length
@@ -103,6 +119,51 @@ class Router:
                 sl = slice(l * b.WH, (l + 1) * b.WH)
                 ok = np.where(b.n1[sl] == n, b.d2[sl], b.d1[sl]) >= self.per[n]["thr"]
                 self.plane_mask[n] = (l, (m & ok).reshape(b.H, b.W))
+        self.pour_shrink = {}
+        for n in self.plane_mask:
+            for l in range(b.L):
+                zc, zw = b.pour_rules(n, l)
+                need = zc + zw / 2
+                have = b.net_rule[n]["clearance"] + b.net_rule[n]["width"] / 2
+                self.pour_shrink[(n, l)] = max(0, int(math.ceil((need - have) / b.res - 1e-6)))
+        # pads a pour joins with thermal spokes: a gap ring around them, joined only by spokes
+        self.therm = {}
+        for n in self.plane_mask:
+            for l in range(b.L):
+                gap, spoke, conn = b.thermal(n, l)
+                pads = []
+                for t in b.terminals[n]:
+                    for it in t["items"]:
+                        if it["kind"] != "pad" or l not in it["geoms"]:
+                            continue
+                        c = it.get("zone_connection", -1)
+                        c = conn if c < 0 else c
+                        if c == 3:
+                            c = 1 if it["pth"] else 2
+                        if c in (0, 1):
+                            g = it["geoms"][l]
+                            ctr = np.array(it["at"], float)
+                            pts = np.array(g.exterior.coords if g.geom_type == "Polygon" else
+                                           [q for gg in g.geoms for q in gg.exterior.coords])
+                            spokes = []
+                            if c == 1:
+                                for k4 in range(4):        # KiCad's four spokes, at the pad's spoke angle
+                                    a = math.radians(it["spokes"] + 90 * k4)
+                                    u = np.array([math.cos(a), math.sin(a)])
+                                    spokes.append((u, float(((pts - ctr) @ u).max())))
+                            pads.append((b.cells_in(g, l) % b.WH, ctr, spokes))
+                # the fill keeps its minimum width from the gap's edge too
+                zw = b.pour_rules(n, l)[1]
+                self.therm[(n, l)] = (int(math.ceil((gap + zw / 2) / b.res)), max(1, int(spoke / b.res)), pads)
+        self.side_mask = {}
+        for (n, l), region in b.side_pours.items():
+            if n in self.plane_mask:
+                idx, X, Y = b.patch(region, 0)
+                m = np.zeros(b.WH, bool)
+                m[idx[shapely.contains_xy(region, X, Y)]] = True
+                sl = slice(l * b.WH, (l + 1) * b.WH)
+                ok = np.where(b.n1[sl] == n, b.d2[sl], b.d1[sl]) >= self.per[n]["thr"]
+                self.side_mask[(n, l)] = (m & ok).reshape(b.H, b.W)
         self.paths = {}          # net -> list of node arrays
         self.failed = {}         # net -> list of terminals it couldn't reach
         self.stamped = set()
@@ -275,24 +336,124 @@ class Router:
         return paths, failed
 
     # ---- planes ----
-    def main_island(self, n):
-        """The biggest connected piece the pour will fill on net n's plane layer,
-        with every other net's copper as it is now (net n must not be stamped)."""
+    def pour_pieces(self, n, l, mask):
+        """Net n's pour on layer l as KiCad will fill it, with every other net's
+        copper as it is now (net n must not be stamped): returns (labels, group of
+        each label, groups a pad's spokes reach). Pieces joined by a thermal pad's
+        spokes are in one group."""
         b = self.b
-        pl, mask = self.plane_mask[n]
         kt = self.per[n]["kt"]
-        occ = self.grid.occ[kt * self.grid.N + pl * b.WH: kt * self.grid.N + (pl + 1) * b.WH].reshape(b.H, b.W)
-        lab, k = ndimage.label(mask & (occ == 0))
-        if k == 0:
+        occ = self.grid.occ[kt * self.grid.N + l * b.WH: kt * self.grid.N + (l + 1) * b.WH].reshape(b.H, b.W)
+        free = self.filled(n, l, mask & (occ == 0))
+        clear = mask & (occ == 0)            # where a spoke may cross (no other copper)
+        # (free is where the centre of the fill's minimum-width brush can be; the gap
+        # ring below includes that half width, so the slivers KiCad can't fill go too)
+        gap, spoke, pads = self.therm.get((n, l), (0, 1, []))
+        rings = []
+        for xy, ctr, spokes in pads:
+            if not len(xy):
+                continue
+            ys, xs = xy // b.W, xy % b.W
+            R = gap + 3
+            y0, x0 = max(0, ys.min() - R), max(0, xs.min() - R)
+            y1, x1 = min(b.H, ys.max() + R + 1), min(b.W, xs.max() + R + 1)
+            loc = np.zeros((y1 - y0, x1 - x0), bool)
+            loc[ys - y0, xs - x0] = True
+            inner = grow(loc, gap)
+            free[y0:y1, x0:x1] &= ~inner
+            if spokes:
+                rings.append((ctr, spokes))
+        lab, k = ndimage.label(free)
+        res = b.res
+        sw = spoke * res
+
+        def cell(pnt):
+            x, y = b.to_cell(*pnt)
+            return (x, y) if 0 <= x < b.W and 0 <= y < b.H else None
+
+        def spoke_label(ctr, u, ext):
+            """The piece a spoke from this pad edge in direction u lands in (0: none):
+            the strip across the gap must be clear and land fully on one piece."""
+            v = np.array([-u[1], u[0]])
+            land = set()
+            for t in np.linspace(-sw / 2, sw / 2, 5):
+                for dist in np.arange(ext, ext + gap * res + 1e-9, res):     # across the gap
+                    c = cell(ctr + u * dist + v * t)
+                    if c is None or not clear[c[1], c[0]]:
+                        return 0
+                c = cell(ctr + u * (ext + gap * res + 1.5 * res) + v * t)  # just past it
+                if c is None or not lab[c[1], c[0]]:
+                    return 0
+                land.add(int(lab[c[1], c[0]]))
+            return land.pop() if len(land) == 1 else 0
+        parent = list(range(k + 1))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+        landed = []
+        for ctr, spokes in rings:
+            ls = [a for a in (spoke_label(ctr, u, ext) for u, ext in spokes) if a]
+            landed.append(ls)
+            for a in ls[1:]:
+                parent[find(a)] = find(ls[0])
+        group = np.array([find(i) for i in range(k + 1)])
+        spoked = {int(group[a]) for ls in landed for a in ls}
+        self._spoke_cache = (n, l, landed)
+        return lab, group, spoked
+
+    def main_island(self, n):
+        """Where net n's plane pour joins up: the biggest group of pieces it will
+        fill (net n must not be stamped)."""
+        pl, mask = self.plane_mask[n]
+        lab, group, _ = self.pour_pieces(n, pl, mask)
+        if len(group) < 2:
             return np.zeros_like(mask)
-        sizes = np.bincount(lab.ravel())
+        g = group[lab]
+        sizes = np.bincount(g.ravel())
         sizes[0] = 0
-        return lab == int(np.argmax(sizes))
+        return g == int(np.argmax(sizes))
+
+    def filled(self, n, l, free):
+        """Where the pour will really be: the free cells, shrunk by what the zone's
+        own clearance and minimum width take beyond the net's rules."""
+        k = self.pour_shrink.get((n, l), 0)
+        return shrink(free, k) if k else free
 
     def in_island(self, t, pl, island):
+        """Is terminal t joined to the island on layer pl: its copper in it, or
+        (a pad with a thermal gap) spokes' room of the island just outside the gap."""
+        b = self.b
         c = t["cells"]
-        c = c[(c // self.b.WH) == pl] % self.b.WH
-        return bool(len(c)) and bool(island.ravel()[c].any())
+        c = c[(c // b.WH) == pl] % b.WH
+        if not len(c):
+            return False
+        if island.ravel()[c].any():
+            return True
+        # a thermal pad: does one of its spokes land on the island?
+        gap, spoke, pads = self.therm.get((t["net"], pl), (0, 1, []))
+        res = b.res
+        sw = spoke * res
+        for it in t["items"]:
+            if it["kind"] != "pad" or pl not in it["geoms"]:
+                continue
+            ctr = np.array(it["at"], float)
+            for xy, pc, spokes in pads:
+                if not np.allclose(pc, ctr):
+                    continue
+                for u, ext in spokes:
+                    v = np.array([-u[1], u[0]])
+                    ok = True
+                    for tt in np.linspace(-sw / 2, sw / 2, 5):
+                        x, y = b.to_cell(*(ctr + u * (ext + gap * res + 1.5 * res) + v * tt))
+                        if not (0 <= x < b.W and 0 <= y < b.H and island[y, x]):
+                            ok = False
+                            break
+                    if ok:
+                        return True
+        return False
 
     def joined_to_plane(self, n, paths, island):
         """Nodes known joined to the plane: the island, and the stubs that land on it
@@ -385,7 +546,7 @@ class Router:
             return set()
         m = np.zeros(b.WH, bool)
         m[np.unique(nodes % b.WH)] = True
-        m = ndimage.binary_dilation(m.reshape(b.H, b.W), iterations=max(1, int(mm / b.res))).ravel()
+        m = grow(m.reshape(b.H, b.W), max(1, int(mm / b.res))).ravel()
         out = set()
         for n in self.nets:
             nodes_n, _ = self.net_nodes(n)
@@ -484,6 +645,66 @@ class Router:
                         break
             self.stamp(n, +1)
         self.hard = False
+        self.stitch_islands()
+
+    def stitch_islands(self):
+        """A plane net's pour on another layer breaks into pieces around the other
+        nets' tracks. A piece with none of the net's pads or tracks in it is
+        connected to nothing: give it a via down to the plane."""
+        b = self.b
+        self.stitches = 0
+        for (n, l), mask in self.side_mask.items():
+            pl = self.plane_mask[n][0]
+            p = self.per[n]
+            self.stamp(n, -1)
+            N = self.grid.N
+            occ = lambda k, layer: self.grid.occ[k * N + layer * b.WH: k * N + (layer + 1) * b.WH].reshape(b.H, b.W)
+            lab, group, spoked = self.pour_pieces(n, l, mask)
+            k = len(group) - 1
+            if k:
+                island = self.main_island(n)
+                # joined = one of the net's tracks or vias runs into it (a pad alone may
+                # get no thermal spokes, and an island with nothing of its net is deleted)
+                pads = np.concatenate([t["cells"] for t in b.terminals[n]])
+                own = [pt for pt in self.paths.get(n, [])]
+                own = np.concatenate(own) if own else np.zeros(0, np.int32)
+                own = np.setdiff1d(own, pads)
+                own = own[(own // b.WH) == l] % b.WH
+                # joined: the net's tracks or vias run into it, a solidly joined pad is
+                # in it, or a thermal pad's spokes reach it (the pads are all routed now)
+                joined = set(group[np.unique(lab.ravel()[own])].tolist()) | spoked
+                for t in b.terminals[n]:
+                    c = t["cells"][(t["cells"] // b.WH) == l] % b.WH
+                    joined.update(group[np.unique(lab.ravel()[c])].tolist())
+                joined.discard(0)
+                # where a via of this net may go: fixed copper, other nets, own holes and vias
+                ok = np.ones(b.WH, bool)
+                for layer in range(b.L):
+                    sl = slice(layer * b.WH, (layer + 1) * b.WH)
+                    ok &= np.where(b.n1[sl] == n, b.d2[sl], b.d1[sl]) >= p["vthr"]
+                    ok &= b.via_block[sl] == 0
+                    ok &= occ(p["kv"], layer).ravel() == 0
+                nv = self.novia_for(n, self.paths.get(n, []))
+                ok[nv % b.WH] = False
+                ok &= island.ravel()
+                ok = ok.reshape(b.H, b.W)
+                for i in range(1, k + 1):
+                    if group[i] != i or i in joined:
+                        continue
+                    piece = group[lab] == i
+                    cand = piece & ok
+                    if not cand.any():
+                        continue
+                    depth = ndimage.distance_transform_edt(piece)     # as far inside the piece as it goes
+                    v = int(np.argmax(np.where(cand, depth, -1)))
+                    self.paths.setdefault(n, []).append(np.array([l * b.WH + v, pl * b.WH + v], np.int32))
+                    self.stitches += 1
+                    # the next via keeps its distance from this one
+                    ok.ravel()[self.disk_cells((b.cx(v % b.W), b.cy(v // b.W)),
+                                               b.net_rule[n]["via_d"] + p["thr"] * 2) ] = False
+            self.stamp(n, +1)
+        if self.stitches:
+            self.o.log("stitched %d pour islands to their plane" % self.stitches)
 
     # ---- output ----
     def segments(self, n):

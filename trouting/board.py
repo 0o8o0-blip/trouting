@@ -106,9 +106,10 @@ class Board:
         d = self.d
         for p in d["pads"]:
             n = self.ni.get(p["net"], NO_NET) if p["net"] else NO_NET
+            c = max(p.get("clearance", 0.0), self.net_clr(n))
             for ln, rings in p["shapes"].items():
                 if ln in self.li:
-                    self.items.append((self.li[ln], poly_of(rings), n, self.net_clr(n)))
+                    self.items.append((self.li[ln], poly_of(rings), n, c))
         for s in d["copper_shapes"]:
             n = self.ni.get(s["net"], NO_NET) if s["net"] else NO_NET
             if s["layer"] in self.li:
@@ -141,7 +142,8 @@ class Board:
         self.n1 = np.full(L * WH, -2, np.int32)
         wmax = max([r["width"] for r in self.net_rule] + [0.25])
         vmax = max([r["via_d"] for r in self.net_rule] + [0.6])
-        cmax = max([r["clearance"] for r in self.net_rule] + [self.edge_clr, self.hole_clr])
+        cmax = max([r["clearance"] for r in self.net_rule] + [self.edge_clr, self.hole_clr] +
+                   [c for _, _, _, c in self.items])
         self.rmax = max(wmax, vmax) / 2 + cmax + 0.1
         for l, g, n, c in self.items:
             if g.is_empty:
@@ -190,32 +192,75 @@ class Board:
         self.d1[idx], self.d2[idx], self.n1[idx] = d1, d2, n1
 
     # ---- pours that act as planes ----
+    def pour_region(self, n, l):
+        """Where net n's pours on layer l can fill: its outlines on the board, minus
+        no-pour keepouts and minus other nets' pours of higher priority (with clearance)."""
+        ln = self.layers[l]
+        mine = [p for p in self.d["pours"] if self.ni.get(p["net"]) == n and ln in p["layers"]]
+        if not mine:
+            return Polygon()
+        region = unary_union([poly_of(p["polys"]) for p in mine]).intersection(self.outline)
+        prio = min(p["priority"] for p in mine)
+        for k in self.d["keepouts"]:
+            if k.get("pours") and ln in k["layers"]:
+                region = region.difference(poly_of(k["polys"]))
+        for p in self.d["pours"]:
+            m = self.ni.get(p["net"])
+            if m != n and ln in p["layers"] and p["priority"] > prio:
+                region = region.difference(poly_of(p["polys"]).buffer(self.net_clr(n)))
+        return region
+
+    def pour_rules(self, n, l):
+        """(clearance, min width) of net n's pours on layer l: the widest of them."""
+        ln = self.layers[l]
+        ps = [p for p in self.d["pours"] if self.ni.get(p["net"]) == n and ln in p["layers"]]
+        c = max([p.get("clearance", 0) for p in ps] + [self.net_clr(n)])
+        w = max([p.get("min_width", 0) for p in ps] + [0.0])
+        return c, w
+
+    def thermal(self, n, l):
+        """(gap, spoke width, pad connection) of net n's pours on layer l."""
+        ln = self.layers[l]
+        ps = [p for p in self.d["pours"] if self.ni.get(p["net"]) == n and ln in p["layers"]]
+        if not ps:
+            return 0.5, 0.5, 1
+        return (max(p.get("thermal_gap", 0.5) for p in ps), min(p.get("spoke_width", 0.5) for p in ps),
+                ps[0].get("pad_connection", 1))
+
     def find_planes(self):
         """A net whose pour covers >= 25 % of the board on a layer gets that layer
         as its plane: its pads there are connected by the pour, its other pads
         get a short track and a via down to it."""
         area = self.outline.area
-        best = {}
+        cand = {}
         for p in self.d["pours"]:
             n = self.ni.get(p["net"])
             if n is None:
                 continue
-            g = poly_of(p["polys"]).intersection(self.outline)
             for ln in p["layers"]:
-                if ln not in self.li:
-                    continue
-                l = self.li[ln]
-                region = g
-                for k in self.d["keepouts"]:
-                    if k.get("pours") and ln in k["layers"]:
-                        region = region.difference(poly_of(k["polys"]))
-                a = region.area
-                if a >= 0.25 * area:
-                    # bigger wins; within 10 %, the lower layer (planes are usually at the back)
-                    key = (round(a / (0.1 * area)), l)
-                    if n not in best or key > best[n][0]:
-                        best[n] = (key, l, region)
-        self.planes = {n: (l, region) for n, (_, l, region) in best.items()}
+                l = self.li.get(ln)
+                if l is not None and (n, l) not in cand:
+                    region = self.pour_region(n, l)
+                    if region.area >= 0.25 * area:
+                        cand[(n, l)] = region
+        self.planes = {}
+        for n in {n for n, _ in cand}:
+            mine = {l: r for (m, l), r in cand.items() if m == n}
+            biggest = max(r.area for r in mine.values())
+            # the lowest layer among those within 10 % of the biggest (planes are usually at the back)
+            l = max(l for l, r in mine.items() if r.area >= 0.9 * biggest)
+            self.planes[n] = (l, mine[l])
+        # the plane nets' pours on their other layers: these get stitched to the plane
+        self.side_pours = {}
+        for n, (pl, _) in self.planes.items():
+            for p in self.d["pours"]:
+                if self.ni.get(p["net"]) == n:
+                    for ln in p["layers"]:
+                        l = self.li.get(ln)
+                        if l is not None and l != pl and (n, l) not in self.side_pours:
+                            r = self.pour_region(n, l)
+                            if not r.is_empty:
+                                self.side_pours[(n, l)] = r
         self.plane_layers = {l for l, _ in self.planes.values()}
 
     # ---- what has to be connected ----
@@ -230,7 +275,9 @@ class Board:
             n = self.ni[p["net"]]
             geoms = {self.li[ln]: poly_of(r) for ln, r in p["shapes"].items() if ln in self.li}
             per.setdefault(n, []).append({"kind": "pad", "name": "%s.%s" % (p["ref"], p["num"]),
-                                          "at": p["at"], "geoms": geoms, "pth": "drill_r" in p})
+                                          "at": p["at"], "geoms": geoms, "pth": "drill_r" in p,
+                                          "zone_connection": p.get("zone_connection", -1),
+                                          "spokes": (p.get("rot", 0.0) + p.get("spoke_angle", 90.0)) % 90.0})
         for t in d["tracks"]:
             if t["net"] in self.ni and t["layer"] in self.li:
                 n = self.ni[t["net"]]

@@ -4,6 +4,7 @@ The router itself runs outside KiCad, on the JSON this writes.
 
     python3 trouting_kicad.py dump  board.kicad_pcb board.json [--rip-up]
     python3 trouting_kicad.py apply board.kicad_pcb routes.json out.kicad_pcb [--rip-up]
+    python3 trouting_kicad.py fills board.kicad_pcb fills.json      (debugging: KiCad's pour fill)
 
 dump:  everything the router needs, in mm, absolute board coordinates:
        copper layers, design rules per net (from the net classes), every pad
@@ -12,7 +13,8 @@ dump:  everything the router needs, in mm, absolute board coordinates:
        rotation, side, courtyard) for the placement suggestions.
        --rip-up leaves out tracks/vias that aren't locked (they get rerouted).
 apply: adds the routed tracks and vias, refills the pours, saves to out.
-       --rip-up first removes the unlocked tracks/vias, as dump left them out.
+       --rip-up first removes the unlocked tracks/vias and all teardrops, as dump
+       left them out (KiCad can add teardrops again: Edit > Edit Teardrops).
 """
 import json
 import sys
@@ -109,7 +111,15 @@ def dump(board, path, rip_up):
                 d["holes"].append({"at": pt(p.GetPosition()), "r": mm(max(dr.x, dr.y)) / 2})
                 continue
             e = {"ref": ref, "num": p.GetNumber(), "net": p.GetNetname(),
-                 "at": pt(p.GetPosition()), "shapes": {}}
+                 "at": pt(p.GetPosition()), "shapes": {},
+                 # how pours join it: -1 as the zone says, 0 not, 1 thermal, 2 solid, 3 thermal if PTH
+                 "zone_connection": int(p.GetLocalZoneConnection()) if hasattr(p, "GetLocalZoneConnection") else -1,
+                 "rot": round(p.GetOrientationDegrees(), 3),
+                 "spoke_angle": round(p.GetThermalSpokeAngleDegrees(), 3) if hasattr(p, "GetThermalSpokeAngleDegrees") else 90.0}
+            try:     # pad, footprint and net class overrides, as DRC uses them
+                e["clearance"] = mm(max(p.GetOwnClearance(l) for l in cu if p.IsOnLayer(l)))
+            except Exception:
+                pass
             for l, n in zip(cu, names):
                 if p.IsOnLayer(l) and p.FlashLayer(l):
                     ps = pcbnew.SHAPE_POLY_SET()
@@ -139,6 +149,8 @@ def dump(board, path, rip_up):
     for f in board.GetFootprints():
         zones += list(f.Zones())
     for z in zones:
+        if rip_up and z.IsTeardropArea():
+            continue                 # teardrops belong to the tracks being ripped up
         zl = [n for l, n in zip(cu, names) if z.GetLayerSet().Contains(l)]
         if z.GetIsRuleArea():
             d["keepouts"].append({"name": z.GetZoneName(), "layers": zl,
@@ -146,7 +158,13 @@ def dump(board, path, rip_up):
                                   "pads": z.GetDoNotAllowPads(), "pours": z.GetDoNotAllowZoneFills() if hasattr(z, "GetDoNotAllowZoneFills") else z.GetDoNotAllowCopperPour(),
                                   "polys": polys(z.Outline())})
         elif zl:
+            lc = z.GetLocalClearance()
+            lc = lc.value() if hasattr(lc, "value") else lc      # KiCad 9: std::optional
             d["pours"].append({"net": z.GetNetname(), "layers": zl, "priority": z.GetAssignedPriority(),
+                               "clearance": mm(lc or 0), "min_width": mm(z.GetMinThickness()),
+                               "thermal_gap": mm(z.GetThermalReliefGap()),
+                               "spoke_width": mm(z.GetThermalReliefSpokeWidth()),
+                               "pad_connection": int(z.GetPadConnection()),
                                "polys": polys(z.Outline())})
 
     for t in board.GetTracks():
@@ -190,6 +208,25 @@ def dump(board, path, rip_up):
              len(d["tracks"]), len(d["vias"]), " (NO board outline, using bounding box)" if d.get("outline_missing") else ""))
 
 
+def fills(board, path):
+    """The pours' filled copper as KiCad made it (outlines with holes), per net and layer."""
+    out = []
+    for z in board.Zones():
+        if z.GetIsRuleArea() or z.IsTeardropArea():
+            continue
+        for l in z.GetLayerSet().CuStack():
+            fp = z.GetFilledPolysList(l)
+            for i in range(fp.OutlineCount()):
+                o = fp.Outline(i)
+                out.append({"net": z.GetNetname(), "layer": board.GetLayerName(l),
+                            "outline": [pt(o.CPoint(k)) for k in range(o.PointCount())],
+                            "holes": [[pt(h.CPoint(k)) for k in range(h.PointCount())]
+                                      for h in (fp.Hole(i, j) for j in range(fp.HoleCount(i)))]})
+    with open(path, "w") as fh:
+        json.dump(out, fh)
+    print("%d filled pieces" % len(out))
+
+
 def apply(board, path, out, rip_up):
     r = json.load(open(path))
     nets = {n.GetNetname(): n for n in board.GetNetsByNetcode().values()}
@@ -198,6 +235,10 @@ def apply(board, path, out, rip_up):
         for t in list(board.GetTracks()):
             if is_unlocked_copper(t):
                 board.Delete(t)      # Delete, not Remove: KiCad 9 crashes later on removed items
+        # the ripped-up tracks' teardrops (zones in KiCad 9) would be left as stray copper
+        for z in list(board.Zones()):
+            if z.IsTeardropArea():
+                board.Delete(z)
 
     def P(xy):
         return pcbnew.VECTOR2I(pcbnew.FromMM(xy[0]), pcbnew.FromMM(xy[1]))
@@ -227,6 +268,8 @@ if __name__ == "__main__":
     b = pcbnew.LoadBoard(args[1])
     if args[0] == "dump":
         dump(b, args[2], rip)
+    elif args[0] == "fills":
+        fills(b, args[2])
     elif args[0] == "apply":
         apply(b, args[2], args[3], rip)
     else:
