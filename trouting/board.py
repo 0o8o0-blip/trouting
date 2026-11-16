@@ -4,8 +4,10 @@ from the JSON trouting_kicad.py dumps.
 Static copper becomes three arrays per layer (see core.c): d1/n1 = distance to
 the nearest copper and its net, d2 = distance to the nearest copper of any
 other net. Distances are exact (to the real polygons, at each cell centre)
-and already have the item's own clearance taken off, so the router's test is
-just "distance >= half my width".
+and already have the clearance taken off, so the router's test is just
+"distance >= half my width". KiCad keeps the larger of two items'
+clearances, so there is one set of arrays per net clearance in use (D1[ci]
+for nets of clearance clrs[ci]).
 """
 import math
 
@@ -40,6 +42,8 @@ class Board:
         self.net_rule = [d["nets"][n] for n in self.net_names]
         clrs = [r["clearance"] for r in self.net_rule] or [0.2]
         self.c_ref = min(clrs)
+        self.clrs = sorted(set(clrs))                 # the clearance classes
+        self.cc = [self.clrs.index(r["clearance"]) for r in self.net_rule]
         self.edge_clr = rules.get("edge_clearance") or 0.3
         self.hole_clr = rules.get("hole_clearance") or 0.25
 
@@ -55,7 +59,9 @@ class Board:
         self.H = int(math.ceil((y1 - y0) / res)) + 3
         self.WH = self.W * self.H
 
-        self.items = []          # (layer index, geometry, net index, item clearance)
+        self.items = []          # (layer index, geometry, net index, item clearance, fixed)
+        # (fixed: the clearance is the item's alone, not the larger of it and the net's:
+        # holes keep the hole clearance, keepouts none)
         self.collect_items()
         self.build_static()
         self.find_planes()
@@ -111,48 +117,49 @@ class Board:
             c = p.get("clearance") or self.net_clr(n)
             for ln, rings in p["shapes"].items():
                 if ln in self.li:
-                    self.items.append((self.li[ln], poly_of(rings), n, c))
+                    self.items.append((self.li[ln], poly_of(rings), n, c, False))
         for s in d["copper_shapes"]:
             n = self.ni.get(s["net"], NO_NET) if s["net"] else NO_NET
             if s["layer"] in self.li:
-                self.items.append((self.li[s["layer"]], poly_of(s["polys"]), n, self.net_clr(n)))
+                self.items.append((self.li[s["layer"]], poly_of(s["polys"]), n, self.net_clr(n), False))
         for t in d["tracks"]:          # what dump kept: locked (or all, without --rip-up)
             n = self.ni.get(t["net"], NO_NET)
             if t["layer"] in self.li:
                 g = LineString([t["a"], t["b"]]).buffer(t["w"] / 2)
-                self.items.append((self.li[t["layer"]], g, n, self.net_clr(n)))
+                self.items.append((self.li[t["layer"]], g, n, self.net_clr(n), False))
         for v in d["vias"]:
             n = self.ni.get(v["net"], NO_NET)
             g = Point(v["at"]).buffer(v["d"] / 2)
             for l in range(self.L):
-                self.items.append((l, g, n, self.net_clr(n)))
+                self.items.append((l, g, n, self.net_clr(n), False))
         for h in d["holes"]:
             g = Point(h["at"]).buffer(h["r"])
             for l in range(self.L):
-                self.items.append((l, g, NO_NET, self.hole_clr))
+                self.items.append((l, g, NO_NET, self.hole_clr, True))
         for k in d["keepouts"]:
             if k["tracks"]:
                 g = poly_of(k["polys"])
                 for ln in k["layers"]:
                     if ln in self.li:
-                        self.items.append((self.li[ln], g, NO_NET, 0.0))
+                        self.items.append((self.li[ln], g, NO_NET, 0.0, True))
 
     def build_static(self):
-        L, WH = self.L, self.WH
-        self.d1 = np.full(L * WH, BIG, np.float32)
-        self.d2 = np.full(L * WH, BIG, np.float32)
-        self.n1 = np.full(L * WH, -2, np.int32)
+        L, WH, C = self.L, self.WH, len(self.clrs)
+        self.D1 = np.full((C, L * WH), BIG, np.float32)
+        self.D2 = np.full((C, L * WH), BIG, np.float32)
+        self.N1 = np.full((C, L * WH), -2, np.int32)
         wmax = max([r["width"] for r in self.net_rule] + [0.25])
         vmax = max([r["via_d"] for r in self.net_rule] + [0.6])
         cmax = max([r["clearance"] for r in self.net_rule] + [self.edge_clr, self.hole_clr] +
-                   [c for _, _, _, c in self.items])
+                   [it[3] for it in self.items])
         self.rmax = max(wmax, vmax) / 2 + cmax + 0.1
-        for l, g, n, c in self.items:
+        for l, g, n, c, fixed in self.items:
             if g.is_empty:
                 continue
             idx, X, Y = self.patch(g, self.rmax)
-            dist = shapely.distance(g, shapely.points(X, Y)) - c
-            self.merge(l * WH + idx, dist.astype(np.float32), n)
+            dist = shapely.distance(g, shapely.points(X, Y))
+            for ci, cn in enumerate(self.clrs):
+                self.merge(ci, l * WH + idx, (dist - (c if fixed else max(c, cn))).astype(np.float32), n)
 
         # board edge: outside is blocked outright, near the edge keeps edge clearance
         allidx, X, Y = self.patch(self.outline, self.res)
@@ -164,8 +171,11 @@ class Board:
         dist[inside] = BIG
         dist[near] = shapely.distance(self.outline.boundary, shapely.points(X[near], Y[near])) - self.edge_clr
         sel = dist < BIG
-        for l in range(L):
-            self.merge(l * WH + allidx[sel], dist[sel], NO_NET)
+        for ci in range(C):
+            for l in range(L):
+                self.merge(ci, l * WH + allidx[sel], dist[sel], NO_NET)
+        # (the first class's arrays, for drawing)
+        self.d1, self.d2, self.n1 = self.D1[0], self.D2[0], self.N1[0]
         self.inside = np.zeros(WH, bool)
         self.inside[allidx[inside]] = True
 
@@ -178,8 +188,13 @@ class Board:
                     if ln in self.li:
                         self.via_block[self.cells_in(g, self.li[ln])] = 1
 
-    def merge(self, idx, dn, n):
-        d1, d2, n1 = self.d1[idx], self.d2[idx], self.n1[idx]
+    def static_d(self, n, sl=slice(None)):
+        """Net n's room from fixed copper (mm beyond the clearance) at nodes sl."""
+        ci = self.cc[n]
+        return np.where(self.N1[ci][sl] == n, self.D2[ci][sl], self.D1[ci][sl])
+
+    def merge(self, ci, idx, dn, n):
+        d1, d2, n1 = self.D1[ci][idx], self.D2[ci][idx], self.N1[ci][idx]
         same = n1 == n
         closer = ~same & (dn < d1)
         other = ~same & ~closer
@@ -191,7 +206,7 @@ class Board:
         d1 = np.where(closer, dn, d1)
         # farther, of another net than the nearest
         d2 = np.where(other, np.minimum(d2, dn), d2)
-        self.d1[idx], self.d2[idx], self.n1[idx] = d1, d2, n1
+        self.D1[ci][idx], self.D2[ci][idx], self.N1[ci][idx] = d1, d2, n1
 
     # ---- pours that act as planes ----
     def pour_region(self, n, l):

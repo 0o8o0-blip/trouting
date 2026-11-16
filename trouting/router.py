@@ -19,7 +19,7 @@ import shapely
 from scipy import ndimage
 
 from .board import MARGIN
-from .core import Grid
+from .core import Grid, Path, thin_of
 
 
 def grow(mask, r):
@@ -46,9 +46,13 @@ class Options:
     pres_mult = 1.6
     pres_max = 1000.0
     hist_add = 0.3
-    max_rounds = 60
+    max_rounds = 150
     near = 3.0               # mm the first search looks beyond its ends
     neighbour = 1.5          # mm: nets this close to a fight are rerouted with it
+    neck_cost = 2.0          # a step of narrowed track costs this many of full width (0: never narrow)
+    neck_width = None        # mm the wide nets narrow to (None: the Default class width, at least min track)
+    neck_switch = 6.0        # cells of track a change of width costs (else it flickers wide-narrow-wide)
+    turn_cost = 0.3          # cells a change of direction costs (against needless zig-zags)
     log = print
 
 
@@ -58,34 +62,56 @@ class Router:
         self.o = opt or Options()
         res = b.res
         rules = b.net_rule
-        # shape classes: each distinct track width and via diameter
-        self.tw = sorted({r["width"] for r in rules}) or [0.25]
-        self.vd = sorted({r["via_d"] for r in rules}) or [0.6]
-        self.K = len(self.tw) + len(self.vd)
-        # a via keeps the copper clearance from its pad and the hole clearance from its
-        # drill, whichever reaches further (for low-clearance nets, the drill's)
+        # neck-down: nets wider than the Default class may narrow to it (not below the
+        # board's minimum track) where the full width doesn't fit
+        min_track = b.d["rules"].get("min_track") or 0.0
+        dflt = [r["width"] for r in rules if r.get("class") == "Default"]
+        nw = self.o.neck_width or max(min_track, min(dflt) if dflt else min_track)
+        self.neck_w = [nw if self.o.neck_cost > 0 and 0 < nw < r["width"] - 1e-6 else None for r in rules]
+        # shape classes: each distinct (track width, clearance) and (via size, drill,
+        # clearance). A net stamps, for each class, how close that shape's centre may
+        # come to its copper, so "may a shape of class k go here" is one lookup.
         hole_clr = b.hole_clr
-        drill = {v: max([r["via_drill"] for r in rules if r["via_d"] == v] + [0.0]) for v in self.vd}
-        self.via_reach = {v: max(v / 2, drill[v] / 2 + hole_clr - b.c_ref) for v in self.vd}
-        half = [w / 2 for w in self.tw] + [self.via_reach[v] for v in self.vd]
-        cmax = [0.0] * self.K
-        for r in rules:
-            for k in (self.tw.index(r["width"]), len(self.tw) + self.vd.index(r["via_d"])):
-                cmax[k] = max(cmax[k], r["clearance"])
+        h2h = b.d["rules"].get("hole_to_hole") or 0.25
+        tcls = set()
+        for n, r in enumerate(rules):
+            tcls.add((r["width"], r["clearance"]))
+            if self.neck_w[n]:
+                tcls.add((self.neck_w[n], r["clearance"]))
+        self.tcls = sorted(tcls) or [(0.25, 0.2)]
+        self.vcls = sorted({(r["via_d"], r["via_drill"], r["clearance"]) for r in rules}) or [(0.6, 0.3, 0.2)]
+        T = len(self.tcls)
+        self.K = T + len(self.vcls)
+        # (kind, half size, drill radius, clearance) of each class
+        shapes = [("t", w / 2, 0.0, c) for w, c in self.tcls] + [("v", d / 2, dr / 2, c) for d, dr, c in self.vcls]
+
+        def reach(a, k):
+            """Closest two shapes' centres may be: a (one of the net's) and class k."""
+            ka, ha, ra, ca = a
+            kb, hb, rb, cb = shapes[k]
+            d = ha + hb + max(ca, cb)                       # copper to copper
+            if ka == "v":
+                d = max(d, ra + hole_clr + hb)              # its hole to the other's copper
+            if kb == "v":
+                d = max(d, rb + hole_clr + ha)
+            if ka == "v" and kb == "v":
+                d = max(d, ra + rb + h2h)
+            return (d + MARGIN) / res
         self.per = []
         for n, r in enumerate(rules):
             c = r["clearance"]
-            extra = max(0.0, c - b.c_ref)
-            rt = [(r["width"] / 2 + max(c, cmax[k]) + half[k] + MARGIN) / res for k in range(self.K)]
-            # (the via's drill against another net's track: its reach already counts the
-            # hole clearance, so use the smaller copper term there)
-            rv = [(max(r["via_d"] / 2 + max(c, cmax[k]), r["via_drill"] / 2 + hole_clr) + half[k] + MARGIN) / res
-                  for k in range(self.K)]
+            w2 = self.neck_w[n] or r["width"]
+            tw, tn = ("t", r["width"] / 2, 0.0, c), ("t", w2 / 2, 0.0, c)
+            vs = ("v", r["via_d"] / 2, r["via_drill"] / 2, c)
             self.per.append({
-                "kt": self.tw.index(r["width"]), "kv": len(self.tw) + self.vd.index(r["via_d"]),
-                "thr": r["width"] / 2 + extra + MARGIN,
-                "vthr": max(r["via_d"] / 2 + extra, r["via_drill"] / 2 + hole_clr - b.c_ref) + MARGIN,
-                "rt": rt, "rv": rv,
+                "kt": self.tcls.index((r["width"], c)), "kt2": self.tcls.index((w2, c)),
+                "kv": T + self.vcls.index((r["via_d"], r["via_drill"], c)),
+                # (the static arrays have the clearance taken off already; a drill
+                # keeps the hole clearance, of which the copper clearance is taken off)
+                "thr": r["width"] / 2 + MARGIN, "thr2": w2 / 2 + MARGIN,
+                "vthr": max(r["via_d"] / 2, r["via_drill"] / 2 + hole_clr - c) + MARGIN,
+                "rt": [reach(tw, k) for k in range(self.K)], "rt2": [reach(tn, k) for k in range(self.K)],
+                "rv": [reach(vs, k) for k in range(self.K)],
             })
         lc = [self.o.plane_layer_cost if l in b.plane_layers else 1.0 for l in range(b.L)]
         self.grid = Grid(b, self.K, lc)
@@ -102,9 +128,15 @@ class Router:
             self.nets.append(n)
         self.own = {n: np.unique(np.concatenate([t["own"] for t in b.terminals[n]])) for n in self.nets}
         self.novia = {n: np.unique(np.concatenate([t["novia"] for t in b.terminals[n]])) for n in self.nets}
+        # where a narrowed track lies inside its own copper
+        self.own2 = {}
+        for n in self.nets:
+            if self.neck_w[n]:
+                cs = [b.cells_in(g, l, shrink=self.neck_w[n] / 2)
+                      for t in b.terminals[n] for it in t["items"] for l, g in it["geoms"].items()]
+                self.own2[n] = np.unique(np.concatenate(cs)).astype(np.int32) if cs else None
         # hole to hole: a net's vias keep away from its own holes (other nets' are kept
         # further away by the copper clearance already)
-        h2h = b.d["rules"].get("hole_to_hole") or 0.25
         self.own_holes = {}
         for n in self.nets:
             vd = b.net_rule[n]["via_drill"]
@@ -127,7 +159,7 @@ class Router:
                 m[idx[shapely.contains_xy(region, X, Y)]] = True
                 # where the pour can be at all: the region, minus other nets' fixed copper
                 sl = slice(l * b.WH, (l + 1) * b.WH)
-                ok = np.where(b.n1[sl] == n, b.d2[sl], b.d1[sl]) >= self.per[n]["thr"]
+                ok = b.static_d(n, sl) >= self.per[n]["thr"]
                 self.plane_mask[n] = (l, (m & ok).reshape(b.H, b.W))
         self.pour_shrink = {}
         for n in self.plane_mask:
@@ -172,7 +204,7 @@ class Router:
                 m = np.zeros(b.WH, bool)
                 m[idx[shapely.contains_xy(region, X, Y)]] = True
                 sl = slice(l * b.WH, (l + 1) * b.WH)
-                ok = np.where(b.n1[sl] == n, b.d2[sl], b.d1[sl]) >= self.per[n]["thr"]
+                ok = b.static_d(n, sl) >= self.per[n]["thr"]
                 self.side_mask[(n, l)] = (m & ok).reshape(b.H, b.W)
         # plane nets: which terminal a cell belongs to (a stub joins its own pad to the plane)
         self.term_of_cell = {}
@@ -252,11 +284,17 @@ class Router:
         m = (a % WH) == (c % WH)
         return (a[m] % WH).astype(np.int32)
 
-    def net_nodes(self, n):
+    def net_nodes(self, n, thin=False):
+        """A net's track nodes and via xys (and with thin, which nodes are narrow)."""
         ps = self.paths.get(n, [])
         if not ps:
-            return np.zeros(0, np.int32), np.zeros(0, np.int32)
-        return np.concatenate(ps).astype(np.int32), np.concatenate([self.vias_of(p) for p in ps]).astype(np.int32)
+            z = np.zeros(0, np.int32)
+            return (z, np.zeros(0, bool), z) if thin else (z, z)
+        nodes = np.concatenate(ps).astype(np.int32)
+        vias = np.concatenate([self.vias_of(p) for p in ps]).astype(np.int32)
+        if thin:
+            return nodes, np.concatenate([thin_of(p) for p in ps]), vias
+        return nodes, vias
 
     # ---- one search ----
     def search(self, n, src, tgt, pres, grows, paths=()):
@@ -268,6 +306,7 @@ class Router:
         sxy = src % b.WH
         k = int(np.argmin((sxy % b.W - tx) ** 2 + (sxy // b.W - ty) ** 2))
         novia = self.novia_for(n, paths)
+        best = None
         for grow in grows:
             box = self.full() if grow is None else self.bbox_of(np.concatenate([src[k:k + 1], tgt]), grow)
             s = self.in_box(src, box)
@@ -275,16 +314,32 @@ class Router:
                 continue
             path = self.route_once(n, s, tgt, novia, box, tbox, pres)
             if path is not None:
-                return path
-        return None
+                best = path
+                # through someone else's copper: a bigger box may hold a way around
+                if self.hard or self.clean(n, path):
+                    break
+        return best
+
+    def clean(self, n, path):
+        """Does a path (net n unstamped) keep clear of every other net's copper?"""
+        b, p, N = self.b, self.per[n], self.grid.N
+        th = thin_of(path)
+        k = np.where(th, p["kt2"], p["kt"])
+        if self.grid.occ[k * N + path].any():
+            return False
+        v = self.vias_of(path)
+        return not len(v) or not any(self.grid.occ[p["kv"] * N + l * b.WH + v].any() for l in range(b.L))
 
     def route_once(self, n, src, tgt, novia, box, tbox, pres):
         """One A*; if the path has two of its own vias too close, forbid vias
         around them and search again."""
         b, p = self.b, self.per[n]
         for _ in range(4):
-            path = self.grid.route(n, p["kt"], p["kv"], p["thr"], p["vthr"], src, tgt, self.own[n], novia,
-                                   box, tbox, self.o.via_cost, pres, hard=self.hard)
+            path = self.grid.route(n, b.cc[n], p["kt"], p["kv"], p["thr"], p["vthr"], src, tgt, self.own[n], novia,
+                                   box, tbox, self.o.via_cost, pres, hard=self.hard,
+                                   kt2=p["kt2"], thr2=p["thr2"], own2=self.own2.get(n),
+                                   neck_cost=self.o.neck_cost if self.neck_w[n] else 0.0,
+                                   neck_switch=self.o.neck_switch, turn_cost=self.o.turn_cost)
             if path is None:
                 return None
             bad = self.close_vias(n, path)
@@ -307,6 +362,8 @@ class Router:
             pl, mask = self.plane_mask[n]
             mask = self.main_island(n)
             good = self.joined_to_plane(n, kept, mask) if keep else set()
+            # stubs that lost their way to the plane go (they'd only dangle)
+            kept = [p for p in kept if int(p[-1]) in good]
             joined = [t["cells"] for t in terms
                       if self.in_island(t, pl, mask) or any(int(v) in good for v in t["cells"])]
             todo = [t for t in terms if not (self.in_island(t, pl, mask) or any(int(v) in good for v in t["cells"]))]
@@ -317,6 +374,7 @@ class Router:
                 t = min(todo, key=lambda t: float(np.min(np.hypot(*(jat - t["at"]).T))))
                 todo.remove(t)
                 done = np.concatenate(paths + kept + joined) if paths or kept or joined else np.zeros(0, np.int32)
+                found = None
                 for grow in (o.near, 4 * o.near, None):
                     box = self.full() if grow is None else self.bbox_of(t["cells"], grow)
                     x0, y0, x1, y1 = max(box[0], 0), max(box[1], 0), min(box[2], b.W - 1), min(box[3], b.H - 1)
@@ -329,12 +387,15 @@ class Router:
                     path = self.route_once(n, t["cells"], tgt, self.novia_for(n, paths),
                                            [x0, y0, x1, y1], [x0, y0, x1, y1], pres)
                     if path is not None:
-                        paths.append(path)
-                        joined.append(t["cells"])
-                        break
+                        found = path
+                        if self.hard or self.clean(n, path):
+                            break
+                if found is not None:
+                    paths.append(found)
+                    joined.append(t["cells"])
                 else:
                     failed.append(t)
-            return paths, failed
+            return kept + paths, failed
 
         # Prim: grow a tree from the first terminal, always to the nearest one left
         left = list(range(1, len(terms)))
@@ -522,14 +583,14 @@ class Router:
 
     # ---- the rounds ----
     def stamp(self, n, sign):
-        nodes, vias = self.net_nodes(n)
+        nodes, thin, vias = self.net_nodes(n, thin=True)
         p = self.per[n]
-        self.grid.stamp(nodes, vias, p["rt"], p["rv"], sign)
+        self.grid.stamp(nodes, thin if thin.any() else None, vias, p["rt"], p["rt2"], p["rv"], sign)
 
     def conflicts(self, n, hadd=0.0):
-        nodes, vias = self.net_nodes(n)
+        nodes, thin, vias = self.net_nodes(n, thin=True)
         p = self.per[n]
-        return self.grid.conflicts(nodes, vias, p["kt"], p["kv"], hadd)
+        return self.grid.conflicts(nodes, thin if thin.any() else None, vias, p["kt"], p["kt2"], p["kv"], hadd)
 
     def run(self):
         o, b = self.o, self.b
@@ -541,12 +602,23 @@ class Router:
         todo = sorted(self.nets, key=span)
         pres = o.pres0
         self.history = []
+        self.fights = []         # per round: the nets in a fight
+        hot_xy = None            # near last round's fights (xy cells)
         for rnd in range(1, o.max_rounds + 1):
             for n in todo:
+                old = self.paths.get(n, [])
+                kept, keep = old, False
+                if n in self.plane_mask and old and hot_xy is not None:
+                    # a plane net's stubs are each on their own: redo only those in a
+                    # fight or near one, keep the rest
+                    c = set(self.conflicts(n).tolist())
+                    kept = [p for p in old if not hot_xy[p % b.WH].any() and not any(int(v) in c for v in p)]
+                    keep = True
                 if n in self.stamped:
                     self.stamp(n, -1)
                     self.stamped.discard(n)
-                self.paths[n], self.failed[n] = self.route_net(n, pres)
+                self.paths[n] = kept
+                self.paths[n], self.failed[n] = self.route_net(n, pres, keep=keep)
                 self.stamp(n, +1)
                 self.stamped.add(n)
             bad = {}
@@ -559,6 +631,7 @@ class Router:
                     bad[n] = 1                       # cut off from its plane: route it again
                     o.log("  %s: a stub is cut off from the plane, again" % b.net_names[n])
             self.history.append((rnd, len(bad), sum(bad.values())))
+            self.fights.append(sorted(bad))
             o.log("round %2d: %3d nets rerouted, %3d still in a fight (%d cells)  %.0fs"
                   % (rnd, len(todo), len(bad), sum(bad.values()), time.time() - t0))
             if not bad:
@@ -568,18 +641,23 @@ class Router:
                 hot.append(self.conflicts(n, o.hist_add))
             # capped: beyond this, float32 path costs lose the step lengths (and at 1.6^200, overflow)
             pres = min(pres * o.pres_mult, o.pres_max)
-            todo = sorted(set(bad) | self.near_nets(np.concatenate(hot), o.neighbour), key=span)
+            hot_xy = self.near_mask(np.concatenate(hot), o.neighbour)
+            todo = sorted(set(bad) | self.near_nets(hot_xy), key=span)
         self.settle()
         return self
 
-    def near_nets(self, nodes, mm):
-        """Nets with copper within mm of any of these nodes (any layer)."""
+    def near_mask(self, nodes, mm):
+        """xy cells within mm of any of these nodes (any layer)."""
         b = self.b
-        if not len(nodes):
-            return set()
         m = np.zeros(b.WH, bool)
-        m[np.unique(nodes % b.WH)] = True
-        m = grow(m.reshape(b.H, b.W), max(1, int(mm / b.res))).ravel()
+        if len(nodes):
+            m[np.unique(nodes % b.WH)] = True
+            m = grow(m.reshape(b.H, b.W), max(1, int(mm / b.res))).ravel()
+        return m
+
+    def near_nets(self, m):
+        """Nets with copper on these xy cells."""
+        b = self.b
         out = set()
         for n in self.nets:
             nodes_n, _ = self.net_nodes(n)
@@ -649,36 +727,116 @@ class Router:
     def repair(self):
         """Join each net's pieces with walls up: a path found here can't overlap anything."""
         self.hard = True
-        o = self.o
         for n in self.nets:
             self.stamp(n, -1)
-            if n in self.plane_mask:
-                before = len(self.paths[n])
-                more, self.failed[n] = self.route_net(n, 0.0, keep=True)
-                self.paths[n] = self.paths[n] + more
-            else:
-                self.failed[n] = []
-                while True:
-                    comps = self.components(n)
-                    if len(comps) < 2:
-                        break
-                    comps.sort(key=lambda g: -len(g[0]))
-                    main = self.group_nodes(n, comps[0])
-                    joined = False
-                    for g in comps[1:]:
-                        path = self.search(n, main, self.group_nodes(n, g), 0.0, (o.near, 4 * o.near, None),
-                                           self.paths[n])
-                        if path is not None:
-                            self.paths[n].append(path)
-                            joined = True
-                            break
-                    if not joined:
-                        for g in comps[1:]:
-                            self.failed[n].append({"names": sum((self.b.terminals[n][i]["names"] for i in g[0]), [])})
-                        break
+            self.repair_net(n, 0.0)
             self.stamp(n, +1)
         self.hard = False
+        self.endgame()
         self.stitch_islands()
+
+    def repair_net(self, n, pres):
+        """Join net n's pieces (n unstamped); what can't be joined goes to failed[n]."""
+        o = self.o
+        if n in self.plane_mask:
+            self.paths[n], self.failed[n] = self.route_net(n, pres, keep=True)
+            return
+        self.failed[n] = []
+        while True:
+            comps = self.components(n)
+            if len(comps) < 2:
+                return
+            comps.sort(key=lambda g: -len(g[0]))
+            main = self.group_nodes(n, comps[0])
+            for g in comps[1:]:
+                path = self.search(n, main, self.group_nodes(n, g), pres, (o.near, 4 * o.near, None),
+                                   self.paths[n])
+                if path is not None:
+                    self.paths[n].append(path)
+                    break
+            else:
+                for g in comps[1:]:
+                    self.failed[n].append({"names": sum((self.b.terminals[n][i]["names"] for i in g[0]), [])})
+                return
+
+    def endgame(self, tries=3, pres=30.0):
+        """Rip-up and retry for what the rounds left unjoined: route the missing
+        connection through the others (at a price per net in the way), take out
+        the connections it crosses, and join those again around it, walls up.
+        Kept only if that leaves fewer connections missing."""
+        def missing():
+            return sum(len(self.failed.get(n, [])) for n in self.nets)
+        start = missing()
+        for _ in range(tries):
+            todo = [n for n in self.nets if self.failed.get(n)]
+            if not todo:
+                break
+            better = False
+            for n in todo:
+                if not self.failed.get(n):
+                    continue
+                before = missing()
+                snap = {m: list(self.paths.get(m, [])) for m in self.nets}
+                fsnap = {m: list(self.failed.get(m, [])) for m in self.nets}
+                # n's missing piece, through the others
+                self.stamp(n, -1)
+                self.hard = False
+                self.repair_net(n, pres)
+                self.stamp(n, +1)
+                # the others in its way give up the connections it crosses, then rejoin
+                self.hard = True
+                hit = [m for m in self.nets if m != n and len(self.conflicts(m))]
+                for m in hit:
+                    c = set(self.conflicts(m).tolist())
+                    self.stamp(m, -1)
+                    self.paths[m] = [p for p in self.paths[m]
+                                     if not any(int(v) in c for v in p)
+                                     and not any(int(v) + l * self.b.WH in c
+                                                 for v in self.vias_of(p) for l in range(self.b.L))]
+                    self.stamp(m, +1)
+                # n itself, if it still crosses someone (a net that was in the way of the
+                # way it took), drops that and rejoins too
+                for m in [n] + hit:
+                    self.stamp(m, -1)
+                    c = set(self.conflicts_unstamped(m))
+                    if c:
+                        self.paths[m] = [p for p in self.paths[m] if not any(int(v) in c for v in p)]
+                    self.repair_net(m, 0.0)
+                    self.stamp(m, +1)
+                self.hard = False
+                clean = not any(len(self.conflicts(m)) for m in [n] + hit)
+                if clean and missing() < before:
+                    better = True
+                    self.o.log("  endgame: %s joined (%d nets rerouted around it)" % (self.b.net_names[n], len(hit)))
+                    continue
+                self.o.log("  endgame: %s not joined (crossed %s; clean %s, missing %d -> %d)"
+                           % (self.b.net_names[n], [self.b.net_names[m] for m in hit], clean, before, missing()))
+                # undo
+                for m in self.nets:
+                    if self.paths.get(m, []) is not snap[m]:
+                        self.stamp(m, -1)
+                        self.paths[m] = snap[m]
+                        self.failed[m] = fsnap[m]
+                        self.stamp(m, +1)
+            if not better:
+                break
+        if missing() < start:
+            self.o.log("endgame: %d -> %d connections missing" % (start, missing()))
+
+    def conflicts_unstamped(self, n):
+        """Nodes of net n's paths (n not stamped) that another net's copper covers."""
+        b, p, N = self.b, self.per[n], self.grid.N
+        out = []
+        for path in self.paths.get(n, []):
+            th = thin_of(path)
+            k = np.where(th, p["kt2"], p["kt"])
+            occ = self.grid.occ[k * N + path]
+            out += path[occ > 0].tolist()
+            v = self.vias_of(path)
+            for l in range(b.L):
+                vv = l * b.WH + v
+                out += vv[self.grid.occ[p["kv"] * N + vv] > 0].tolist()
+        return out
 
     def stitch_islands(self):
         """A plane net's pour on another layer breaks into pieces around the other
@@ -714,7 +872,7 @@ class Router:
                 ok = np.ones(b.WH, bool)
                 for layer in range(b.L):
                     sl = slice(layer * b.WH, (layer + 1) * b.WH)
-                    ok &= np.where(b.n1[sl] == n, b.d2[sl], b.d1[sl]) >= p["vthr"]
+                    ok &= b.static_d(n, sl) >= p["vthr"]
                     ok &= b.via_block[sl] == 0
                     ok &= occ(p["kv"], layer).ravel() == 0
                 nv = self.novia_for(n, self.paths.get(n, []))
@@ -753,6 +911,9 @@ class Router:
             ends.add(int(path[-1]))
         for path in self.paths.get(n, []):
             pts = [b.node_xy(v) for v in path]
+            th = thin_of(path)
+            # a step is narrow if either end is (a width change sits on a wide node)
+            narrow = lambda i: bool(th[i] or th[i + 1])
             i = 0
             while i < len(pts) - 1:
                 l, x, y = pts[i]
@@ -762,17 +923,19 @@ class Router:
                     i += 1
                     continue
                 d = (x2 - x, y2 - y)
+                nar = narrow(i)
                 j = i + 1
                 while j < len(pts) - 1:
                     la, xa, ya = pts[j]
                     lb, xb, yb = pts[j + 1]
-                    if lb != l or (xb - xa, yb - ya) != d or int(path[j]) in ends:
+                    if lb != l or (xb - xa, yb - ya) != d or int(path[j]) in ends or narrow(j) != nar:
                         break
                     j += 1
                 lj, xj, yj = pts[j]
                 tracks.append({"net": b.net_names[n], "layer": b.layers[l],
                                "a": [round(b.cx(x), 4), round(b.cy(y), 4)],
-                               "b": [round(b.cx(xj), 4), round(b.cy(yj), 4)], "w": r["width"]})
+                               "b": [round(b.cx(xj), 4), round(b.cy(yj), 4)],
+                               "w": self.neck_w[n] if nar else r["width"]})
                 i = j
         out_v = [{"net": b.net_names[n], "at": [round(b.cx(x), 4), round(b.cy(y), 4)],
                   "d": r["via_d"], "drill": r["via_drill"], "layers": [b.layers[0], b.layers[-1]]}

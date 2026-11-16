@@ -11,6 +11,7 @@ as it was.
 """
 import argparse
 import json
+import math
 import multiprocessing as mp
 import os
 import re
@@ -110,11 +111,24 @@ def route_portfolio(board_json, tries, jobs, log):
     setups = SETUPS[:tries]
     ctx = mp.get_context("fork")                 # the workers share the board read above
     results = []
+    deadline = None
     with ctx.Pool(min(jobs, len(setups))) as pool:
-        for res in pool.imap_unordered(_route, setups):
+        it = pool.imap_unordered(_route, setups)
+        while len(results) < len(setups):
+            try:
+                res = it.next(timeout=None if deadline is None else max(0.1, deadline - time.time()))
+            except mp.TimeoutError:
+                log("  (stopped the %d setups still running: a full route is in, and they had half as long again)"
+                    % (len(setups) - len(results)))
+                pool.terminate()
+                break
             log("  setup via %4.1f, plane %.1f: %2d unrouted, %3d vias, %6.0f mm  (%d rounds, %.0fs)"
                 % (res["setup"] + (res["unrouted"], res["vias"], res["length"], res["rounds"], res["secs"])))
             results.append(res)
+            # one setup routed everything: the others get half as long again to do it with
+            # fewer vias, then the best so far is taken
+            if res["unrouted"] == 0 and deadline is None:
+                deadline = time.time() + max(20.0, 0.5 * (time.time() - t))
     results.sort(key=lambda r: (r["unrouted"], r["vias"], r["length"]))
     return results[0]
 
@@ -176,6 +190,16 @@ def main(argv=None):
                 log("  crowded at: " + "; ".join("(%.2f, %.2f)" % tuple(h) for h in best["hot"][:6]))
         else:
             log("\nall connections routed")
+        # where wide nets had to narrow (a designer will want to know: current)
+        neck = {}
+        for t_ in best["out"]["tracks"]:
+            r = _BOARD.d["nets"][t_["net"]]
+            if t_["w"] < r["width"] - 1e-6:
+                neck.setdefault((t_["net"], t_["w"], r["width"]), [0.0])[0] += math.dist(t_["a"], t_["b"])
+        if neck:
+            log("narrowed where the full width didn't fit:")
+            for (net, w, full), (mm,) in sorted(neck.items(), key=lambda kv: -kv[1][0]):
+                log("  %-24s %5.1f mm at %.3g mm (class width %.3g)" % (net, mm, w, full))
         if after is not None:
             log("KiCad DRC: %s unconnected pads (was %s)" % (after_unc, before_unc))
             skip = ("silk", "lib_footprint", "text_", "unconnected_items")
