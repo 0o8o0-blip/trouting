@@ -1,0 +1,7 @@
+__pycache__/
+trouting/_build/
+test/out/
+test/*.json
+*.kicad_prl
+*-backups/
+fp-info-cache
