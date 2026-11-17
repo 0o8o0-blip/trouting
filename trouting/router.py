@@ -53,6 +53,9 @@ class Options:
     neck_width = None        # mm the wide nets narrow to (None: the Default class width, at least min track)
     neck_switch = 6.0        # cells of track a change of width costs (else it flickers wide-narrow-wide)
     turn_cost = 0.3          # cells a change of direction costs (against needless zig-zags)
+    spoke_cost = 0.0         # extra cost per step across a thermal pad's spoke and where it lands
+                             # (up front, for every pad; 0: off, starved pads are fed after routing)
+    min_spokes = 2           # KiCad's zone minimum spoke count
     log = print
 
 
@@ -206,6 +209,7 @@ class Router:
                 sl = slice(l * b.WH, (l + 1) * b.WH)
                 ok = b.static_d(n, sl) >= self.per[n]["thr"]
                 self.side_mask[(n, l)] = (m & ok).reshape(b.H, b.W)
+        self.reserve_spokes()
         # plane nets: which terminal a cell belongs to (a stub joins its own pad to the plane)
         self.term_of_cell = {}
         for n in self.plane_mask:
@@ -218,6 +222,234 @@ class Router:
         self.failed = {}         # net -> list of terminals it couldn't reach
         self.stamped = set()
         self.hard = False        # the repair pass: other nets' copper is a wall
+
+    def reserve_spokes(self):
+        """Per thermal pad, the spokes that can land (the pour is there to land on)
+        and each one's corridor: where another net's track centre or via would cut
+        it, across the gap and on the bit of pour it lands on. With spoke_cost the
+        corridors cost others extra from the start (as history)."""
+        b, c = self.b, self.o.spoke_cost
+        room = max(r["clearance"] + r["width"] / 2 for r in b.net_rule)
+        res = b.res
+        self.spoke_info = {}        # (net, layer) -> per ring (pad with spokes): [corridor node ids]
+        for (n, l), (gap, spoke, pads) in self.therm.items():
+            if l == self.plane_mask[n][0]:
+                mask = self.plane_mask[n][1]
+            elif (n, l) in self.side_mask:
+                mask = self.side_mask[(n, l)]
+            else:
+                continue
+            zw = b.pour_rules(n, l)[1]
+            half = spoke * res / 2 + room
+            rings = []
+            for xy, ctr, spokes in pads:
+                if not len(xy) or not spokes:
+                    continue            # (as pour_pieces orders its rings)
+                cors = []
+                for u, ext in spokes:
+                    land = ctr + u * (ext + gap * res + 1.5 * res)
+                    x, y = b.to_cell(*land)
+                    if not (0 <= x < b.W and 0 <= y < b.H and mask[y, x]):
+                        cors.append(None)           # never any pour to land on
+                        continue
+                    a0, a1 = ext, ext + gap * res + zw + room
+                    R = int(math.ceil((a1 + half) / res)) + 1
+                    cx, cy = b.to_cell(*ctr)
+                    ys, xs = np.mgrid[max(0, cy - R):min(b.H, cy + R + 1), max(0, cx - R):min(b.W, cx + R + 1)]
+                    dx, dy = b.cx(xs) - ctr[0], b.cy(ys) - ctr[1]
+                    along = dx * u[0] + dy * u[1]
+                    across = np.abs(-dx * u[1] + dy * u[0])
+                    m = (along >= a0) & (along <= a1) & (across <= half)
+                    cors.append((l * b.WH + ys[m] * b.W + xs[m]).astype(np.int32))
+                rings.append((ctr, cors, xy))
+                if c > 0:
+                    for idx in cors:
+                        if idx is not None:
+                            self.grid.hist[idx] = np.maximum(self.grid.hist[idx], c)
+            self.spoke_info[(n, l)] = (mask, rings)
+
+    def pour_mask(self, n, l):
+        return self.plane_mask[n][1] if l == self.plane_mask[n][0] else self.side_mask[(n, l)]
+
+    def solid_fill(self, lab, group):
+        """Where KiCad's fill is sure to be: well inside a piece (two cells in) of
+        a group of at least 1 mm² (specks and slivers may not be filled, and a
+        piece that joins only the pad is ignored by KiCad's count)."""
+        g = group[lab]
+        sizes = np.bincount(g.ravel())
+        sizes[0] = 0
+        big = sizes * self.b.res ** 2 >= 1.0
+        return shrink(lab > 0, 2) & big[g], big
+
+    def manual_spokes(self, n, l, cells, lab):
+        """Net n's tracks from a pad (its xy cells on layer l) to the pour: a
+        straight run starting on the pad and ending in the fill (KiCad counts
+        each as a spoke)."""
+        b = self.b
+        cells = set(int(c) for c in cells)
+        got = 0
+        for p in self.paths.get(n, []):
+            for q in (p, p[::-1]):
+                if len(q) < 2 or int(q[0]) // b.WH != l or int(q[0]) % b.WH not in cells:
+                    continue
+                # to the end of the first straight run
+                l0, x0, y0 = b.node_xy(int(q[0]))
+                l1, x1, y1 = b.node_xy(int(q[1]))
+                d = (x1 - x0, y1 - y0)
+                if l1 != l or d == (0, 0):
+                    continue
+                k = 1
+                while k + 1 < len(q):
+                    la, xa, ya = b.node_xy(int(q[k]))
+                    lb, xb, yb = b.node_xy(int(q[k + 1]))
+                    if lb != l or (xb - xa, yb - ya) != d:
+                        break
+                    k += 1
+                _, xe, ye = b.node_xy(int(q[k]))
+                if lab[ye, xe]:
+                    got += 1
+        return got
+
+    def starved(self, only=None):
+        """Thermal pads KiCad will call starved: the pour reaches them (a spoke
+        lands) but with fewer than min_spokes spokes, the net's own tracks from
+        the pad into the pour counted as spokes too.
+        [(net, layer, ring, spokes, the blocked spokes)]"""
+        out = []
+        for (n, l), (mask, rings) in self.spoke_info.items():
+            if not rings or (only is not None and (n, l) != only):
+                continue
+            self.stamp(n, -1)
+            lab, group, _ = self.pour_pieces(n, l, mask)
+            status = self._spoke_cache[3]
+            self.stamp(n, +1)
+            sure, big = self.solid_fill(lab, group)
+            for i, ((ctr, cors, xy), st) in enumerate(zip(rings, status)):
+                if not any(a != 0 for a in st):
+                    continue            # no pour near it: KiCad doesn't check it
+                # (a spoke the model calls blocked may still be made by KiCad, which
+                # then wants a second: such a pad counts as reached)
+                got = sum(1 for a in st if a > 0 and big[group[a]])
+                if got >= self.o.min_spokes:
+                    continue
+                got += self.manual_spokes(n, l, xy, sure)
+                if got < self.o.min_spokes:
+                    out.append((n, l, i, got, [k for k, a in enumerate(st) if a < 0 and cors[k] is not None]))
+        return out
+
+    def add_manual_spoke(self, n, l, i, want=1):
+        """A short straight track of the pad's own net from the pad's centre into
+        the pour (what KiCad counts as a spoke, and what a designer adds by hand):
+        the shortest of the eight directions that reaches solid fill within
+        1.5 mm, clear of everything else. True if one was added."""
+        b, N = self.b, self.grid.N
+        mask, rings = self.spoke_info[(n, l)]
+        ctr, cors, xy = rings[i]
+        p = self.per[n]
+        self.stamp(n, -1)
+        lab, group, _ = self.pour_pieces(n, l, mask)
+        sure, _ = self.solid_fill(lab, group)
+        sl = slice(l * b.WH, (l + 1) * b.WH)
+        stat = b.static_d(n, sl)
+        cx, cy = b.to_cell(*ctr)
+        found = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == dy == 0:
+                    continue
+                nodes = []
+                x, y = cx, cy
+                for _ in range(int(1.5 / b.res / math.hypot(dx, dy))):
+                    if not (0 <= x < b.W and 0 <= y < b.H):
+                        break
+                    v = y * b.W + x
+                    if stat[v] < p["thr"] or self.grid.occ[p["kt"] * N + l * b.WH + v] > 0:
+                        break
+                    nodes.append(l * b.WH + v)
+                    if sure[y, x]:
+                        found.append((len(nodes) * math.hypot(dx, dy), (dx, dy), nodes))
+                        break
+                    x, y = x + dx, y + dy
+        found.sort(key=lambda f: f[0])
+        took = []
+        for f in found:
+            took.append(f)
+            if len(took) == want:
+                break
+        for f in took:
+            sp = Path(f[2])
+            sp.spoke = True                     # ends in the side pour, not on the plane
+            self.paths.setdefault(n, []).append(sp)
+        self.stamp(n, +1)
+        return len(took)
+
+    def feed_thermals(self):
+        """Starved thermal pads: first a short track of their own into the pour
+        (as a designer adds by hand); failing that, the nets crossing a blocked
+        spoke move out of its way (walls up, the corridor walled too), kept only
+        if nothing comes unjoined and the pad then has its spokes."""
+        b, N, K = self.b, self.grid.N, self.K
+        todo = self.starved()
+        if not todo:
+            return
+        tracked = fed = 0
+        for n, l, i, had, bl in todo:
+            # a track is taken as enough: the model undercounts KiCad's spokes, and
+            # KiCad adds each such track to the spokes it made
+            if self.add_manual_spoke(n, l, i, self.o.min_spokes - had):
+                tracked += 1
+                continue
+            mask, rings = self.spoke_info[(n, l)]
+            ctr, cors, xy = rings[i]
+            need = self.o.min_spokes - had
+            cors = [cors[k] for k in bl]
+            if need <= 0 or not cors:
+                continue
+
+            def crossing(idx):
+                xy_ = np.unique(idx % b.WH)
+                hit = []
+                for m in self.nets:
+                    if m == n:
+                        continue
+                    nodes, vias = self.net_nodes(m)
+                    if np.isin(nodes, idx).any() or np.isin(vias, xy_).any():
+                        hit.append(m)
+                return hit
+            ranked = sorted(((crossing(idx), idx) for idx in cors), key=lambda t: len(t[0]))
+            take = ranked[:need]
+            hit = sorted({m for h, _ in take for m in h})
+            if not hit:
+                continue
+            wall = np.concatenate([idx for _, idx in take])
+            missing = lambda: sum(len(self.failed.get(m, [])) for m in self.nets)
+            before = missing()
+            planes_ok = {m for m in self.plane_mask if self.plane_ok(m)}
+            snap = {m: (list(self.paths.get(m, [])), list(self.failed.get(m, []))) for m in hit}
+            for k in range(K):
+                self.grid.occ[k * N + wall] += 1
+            self.hard = True
+            for m in hit:
+                self.stamp(m, -1)
+                self.paths[m] = [p for p in self.paths[m]
+                                 if not (np.isin(p, wall).any() or np.isin(self.vias_of(p), wall % b.WH).any())]
+                self.repair_net(m, 0.0)
+                self.stamp(m, +1)
+            self.hard = False
+            for k in range(K):
+                self.grid.occ[k * N + wall] -= 1
+            clean = not any(len(self.conflicts(m)) for m in hit)
+            now = [x for x in self.starved((n, l)) if x[:3] == (n, l, i)]
+            # (moving them may also cut a plane pour off from stubs that land on it)
+            if clean and missing() <= before and not now and all(self.plane_ok(m) for m in planes_ok):
+                fed += 1
+                continue
+            for m in hit:                       # undo
+                self.stamp(m, -1)
+                self.paths[m], self.failed[m] = snap[m]
+                self.stamp(m, +1)
+        self.o.log("thermal pads short of spokes: %d; given a track %d, spokes cleared %d"
+                   % (len(todo), tracked, fed))
 
     # ---- helpers ----
     def bbox_of(self, nodes, grow_mm):
@@ -384,7 +616,7 @@ class Router:
                     tgt = np.concatenate([tgt, self.in_box(done, box)]) if len(done) else tgt
                     if not len(tgt):
                         continue
-                    path = self.route_once(n, t["cells"], tgt, self.novia_for(n, paths),
+                    path = self.route_once(n, t["entry"], tgt, self.novia_for(n, kept + paths),
                                            [x0, y0, x1, y1], [x0, y0, x1, y1], pres)
                     if path is not None:
                         found = path
@@ -399,7 +631,7 @@ class Router:
 
         # Prim: grow a tree from the first terminal, always to the nearest one left
         left = list(range(1, len(terms)))
-        tree_nodes = [terms[0]["cells"]]
+        tree_nodes = [terms[0]["entry"]]
         tree_at = [terms[0]["at"]]
         while left:
             ats = np.array(tree_at)
@@ -407,12 +639,12 @@ class Router:
             left.remove(best)
             t = terms[best]
             src = np.concatenate(tree_nodes)
-            path = self.search(n, src, t["cells"], pres, (o.near, 4 * o.near, None), paths)
+            path = self.search(n, src, t["entry"], pres, (o.near, 4 * o.near, None), paths)
             if path is None:
                 failed.append(t)
                 continue
             paths.append(path)
-            tree_nodes += [path, t["cells"]]
+            tree_nodes += [path, t["entry"]]
             tree_at.append(t["at"])
             # the path's points join the tree too (a later pad may be nearest to it)
             sel = path[:: max(1, len(path) // 8)]
@@ -452,6 +684,7 @@ class Router:
         lab, k = ndimage.label(free)
         res = b.res
         sw = spoke * res
+        reach = 4 * res + self.b.pour_rules(n, l)[1]     # how far past the gap a spoke may meet the fill
 
         def cell(pnt):
             x, y = b.to_cell(*pnt)
@@ -467,10 +700,19 @@ class Router:
                     c = cell(ctr + u * dist + v * t)
                     if c is None or not clear[c[1], c[0]]:
                         return 0
-                c = cell(ctr + u * (ext + gap * res + 1.5 * res) + v * t)  # just past it
-                if c is None or not lab[c[1], c[0]]:
+                # then on until it meets the fill (KiCad's spoke runs into it; the
+                # model's fill edge may sit a cell or so short of KiCad's)
+                hit = 0
+                for dist in np.arange(ext + gap * res + res, ext + gap * res + reach + 1e-9, res):
+                    c = cell(ctr + u * dist + v * t)
+                    if c is None or not clear[c[1], c[0]]:
+                        break
+                    if lab[c[1], c[0]]:
+                        hit = int(lab[c[1], c[0]])
+                        break
+                if not hit:
                     return 0
-                land.add(int(lab[c[1], c[0]]))
+                land.add(hit)
             return land.pop() if len(land) == 1 else 0
         parent = list(range(k + 1))
 
@@ -479,15 +721,28 @@ class Router:
                 parent[i] = parent[parent[i]]
                 i = parent[i]
             return i
-        landed = []
+        def blocked(ctr, u, ext):
+            """No spoke, but pour beyond the gap it would have reached (KiCad counts
+            such a spoke as wanted and missing; one with no pour to reach isn't)."""
+            for dist in np.arange(ext + gap * res, ext + gap * res + 1.0, res):
+                c = cell(ctr + u * dist)
+                if c is not None and lab[c[1], c[0]]:
+                    return True
+            return False
+        landed, status = [], []
         for ctr, spokes in rings:
-            ls = [a for a in (spoke_label(ctr, u, ext) for u, ext in spokes) if a]
+            st = []
+            for u, ext in spokes:
+                a = spoke_label(ctr, u, ext)
+                st.append(a if a else (-1 if blocked(ctr, u, ext) else 0))
+            status.append(st)
+            ls = [a for a in st if a > 0]
             landed.append(ls)
             for a in ls[1:]:
                 parent[find(a)] = find(ls[0])
         group = np.array([find(i) for i in range(k + 1)])
         spoked = {int(group[a]) for ls in landed for a in ls}
-        self._spoke_cache = (n, l, landed)
+        self._spoke_cache = (n, l, landed, status)
         return lab, group, spoked
 
     def main_island(self, n):
@@ -574,7 +829,7 @@ class Router:
         self.stamp(n, +1)
         paths = self.paths.get(n, [])
         good = self.joined_to_plane(n, paths, isl.reshape(b.H, b.W))
-        if any(int(p[-1]) not in good for p in paths):
+        if any(int(p[-1]) not in good for p in paths if not getattr(p, "spoke", False)):
             return False
         for t in b.terminals[n]:
             if not self.in_island(t, pl, isl.reshape(b.H, b.W)) and not any(int(v) in good for v in t["cells"]):
@@ -722,7 +977,7 @@ class Router:
 
     def group_nodes(self, n, g):
         terms, paths = self.b.terminals[n], self.paths.get(n, [])
-        return np.concatenate([terms[i]["cells"] for i in g[0]] + [paths[i] for i in g[1]]).astype(np.int32)
+        return np.concatenate([terms[i]["entry"] for i in g[0]] + [paths[i] for i in g[1]]).astype(np.int32)
 
     def repair(self):
         """Join each net's pieces with walls up: a path found here can't overlap anything."""
@@ -733,6 +988,7 @@ class Router:
             self.stamp(n, +1)
         self.hard = False
         self.endgame()
+        self.feed_thermals()
         self.stitch_islands()
 
     def repair_net(self, n, pres):
@@ -776,6 +1032,7 @@ class Router:
                 if not self.failed.get(n):
                     continue
                 before = missing()
+                planes_ok = {m for m in self.plane_mask if self.plane_ok(m)}
                 snap = {m: list(self.paths.get(m, [])) for m in self.nets}
                 fsnap = {m: list(self.failed.get(m, [])) for m in self.nets}
                 # n's missing piece, through the others
@@ -805,7 +1062,7 @@ class Router:
                     self.stamp(m, +1)
                 self.hard = False
                 clean = not any(len(self.conflicts(m)) for m in [n] + hit)
-                if clean and missing() < before:
+                if clean and missing() < before and all(self.plane_ok(m) for m in planes_ok):
                     better = True
                     self.o.log("  endgame: %s joined (%d nets rerouted around it)" % (self.b.net_names[n], len(hit)))
                     continue
@@ -851,22 +1108,27 @@ class Router:
             N = self.grid.N
             occ = lambda k, layer: self.grid.occ[k * N + layer * b.WH: k * N + (layer + 1) * b.WH].reshape(b.H, b.W)
             lab, group, spoked = self.pour_pieces(n, l, mask)
+            landed = self._spoke_cache[2]       # (main_island below recomputes the cache)
             k = len(group) - 1
             if k:
                 island = self.main_island(n)
-                # joined = one of the net's tracks or vias runs into it (a pad alone may
-                # get no thermal spokes, and an island with nothing of its net is deleted)
-                pads = np.concatenate([t["cells"] for t in b.terminals[n]])
-                own = [pt for pt in self.paths.get(n, [])]
-                own = np.concatenate(own) if own else np.zeros(0, np.int32)
-                own = np.setdiff1d(own, pads)
-                own = own[(own // b.WH) == l] % b.WH
-                # joined: the net's tracks or vias run into it, a solidly joined pad is
-                # in it, or a thermal pad's spokes reach it (the pads are all routed now)
-                joined = set(group[np.unique(lab.ravel()[own])].tolist()) | spoked
+                # joined: one of the net's vias or through-hole pads is in it (a track
+                # or a pad in it proves nothing: it may lead only to this piece)
+                vxy = [self.vias_of(pt) for pt in self.paths.get(n, [])]
+                vxy = np.concatenate(vxy).astype(np.int64) if vxy else np.zeros(0, np.int64)
+                joined = set(group[np.unique(lab.ravel()[vxy])].tolist()) if len(vxy) else set()
+                pth_at = []
                 for t in b.terminals[n]:
-                    c = t["cells"][(t["cells"] // b.WH) == l] % b.WH
-                    joined.update(group[np.unique(lab.ravel()[c])].tolist())
+                    for it in t["items"]:
+                        if it["kind"] == "via" or it.get("pth"):
+                            pth_at.append(np.array(it["at"], float))
+                            c = t["cells"][(t["cells"] // b.WH) == l] % b.WH
+                            joined.update(group[np.unique(lab.ravel()[c])].tolist())
+                # a thermal through-hole pad joins the pieces its spokes reach
+                rings = [ctr for xy, ctr, spokes in self.therm.get((n, l), (0, 1, []))[2] if len(xy) and spokes]
+                for ctr, ls in zip(rings, landed):
+                    if any(np.allclose(ctr, a) for a in pth_at):
+                        joined.update(int(group[a]) for a in ls)
                 joined.discard(0)
                 # where a via of this net may go: fixed copper, other nets, own holes and vias
                 ok = np.ones(b.WH, bool)
@@ -883,6 +1145,10 @@ class Router:
                     if group[i] != i or i in joined:
                         continue
                     piece = group[lab] == i
+                    # a speck smaller than the via itself: KiCad's fill doesn't keep it
+                    # (and a via there joins nothing), so it's left to be removed
+                    if piece.sum() * b.res ** 2 < math.pi * (b.net_rule[n]["via_d"] / 2) ** 2:
+                        continue
                     cand = piece & ok
                     if not cand.any():
                         continue

@@ -15,7 +15,7 @@ for a in sys.argv[2:]:                       # rounds, or option=value (res=0.02
     else:
         o.max_rounds = int(a)
 t = time.time()
-b = Board(json.load(open(f'/home/tommy/claude/tracer/test/{name}.json')), res=o.res)
+b = Board(json.load(open(f'/home/tommy/claude/tracer/test/boards/{name}.json')), res=o.res)
 print(f'board {time.time()-t:.1f}s')
 r = Router(b, o)
 print(f'router setup {time.time()-t:.1f}s, {len(r.nets)} nets to route, classes {r.tcls} {r.vcls}')

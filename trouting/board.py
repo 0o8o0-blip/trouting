@@ -300,6 +300,7 @@ class Board:
                 n = self.ni[t["net"]]
                 g = LineString([t["a"], t["b"]]).buffer(t["w"] / 2)
                 per.setdefault(n, []).append({"kind": "track", "name": "track", "at": t["a"],
+                                              "ends": [t["a"], t["b"]], "w": t["w"],
                                               "geoms": {self.li[t["layer"]]: g}})
         for v in d["vias"]:
             if v["net"] in self.ni:
@@ -337,7 +338,19 @@ class Board:
                 if it["kind"] == "pad":
                     novia.append(self.cells_in(g, l))
         cat = lambda a: np.unique(np.concatenate(a)).astype(np.int32) if a else np.zeros(0, np.int32)
+        # a kept track end that touches nothing else of the group was left for the
+        # router to carry on from: the group is entered there (else it dangles)
+        entry = []
+        for it in items:
+            if it["kind"] != "track":
+                continue
+            (l, g), = it["geoms"].items()
+            for e in it["ends"]:
+                tip = Point(e).buffer(it["w"] / 2 + 0.01)
+                if not any(o is not it and l in o["geoms"] and o["geoms"][l].intersects(tip) for o in items):
+                    entry.append(self.cells_in(tip, l))
         t = {"net": n, "items": items, "cells": cat(cells), "own": cat(own), "novia": cat(novia),
+             "entry": cat(entry) if entry and len(cat(entry)) else cat(cells),
              "names": [it["name"] for it in items if it["kind"] == "pad"],
              "at": np.mean([it["at"] for it in items], axis=0)}
         if n in self.planes:

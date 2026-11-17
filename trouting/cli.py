@@ -160,7 +160,8 @@ def main(argv=None):
         rip = [] if a.keep_tracks else ["--rip-up"]
         j = os.path.join(work, "board.json")
         log("reading %s" % os.path.basename(src))
-        log("  " + run_kicad(py, ["dump", w_src, j] + rip)[-1])
+        for l in run_kicad(py, ["dump", w_src, j] + rip):
+            log("  " + l)
         before, before_unc = drc(cli, w_src, work, "before")
 
         best = route_portfolio(j, a.tries, a.jobs, log)
@@ -168,7 +169,8 @@ def main(argv=None):
         json.dump(best["out"], open(routes, "w"))
         w_out = os.path.join(work, "out.kicad_pcb")
         log("best: via cost %.1f, plane cost %.1f" % best["setup"])
-        log("  " + run_kicad(py, ["apply", w_src, routes, w_out] + rip)[-1])
+        for l in run_kicad(py, ["apply", w_src, routes, w_out] + rip):
+            log("  " + l)
         after, after_unc = drc(cli, w_out, work, "after")
 
         if out == src:

@@ -109,8 +109,10 @@ def dump(board, path, rip_up):
             if p.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH:
                 dr = p.GetDrillSize()
                 d["holes"].append({"at": pt(p.GetPosition()), "r": mm(max(dr.x, dr.y)) / 2})
-                continue
-            e = {"ref": ref, "num": p.GetNumber(), "net": p.GetNetname(),
+                # an NPTH pad bigger than its hole has a ring of copper (of no net), which
+                # DRC keeps the pad's clearance from: it goes on as a net-less pad
+            npth = p.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH
+            e = {"ref": ref, "num": p.GetNumber(), "net": "" if npth else p.GetNetname(),
                  "at": pt(p.GetPosition()), "shapes": {},
                  # how pours join it: -1 as the zone says, 0 not, 1 thermal, 2 solid, 3 thermal if PTH
                  "zone_connection": int(p.GetLocalZoneConnection()) if hasattr(p, "GetLocalZoneConnection") else -1,
@@ -127,7 +129,7 @@ def dump(board, path, rip_up):
                     e["shapes"][n] = polys(ps)
             if not e["shapes"]:
                 continue
-            if p.HasHole():
+            if p.HasHole() and not npth:
                 dr = p.GetDrillSize()
                 e["drill_r"] = mm(max(dr.x, dr.y)) / 2
             d["pads"].append(e)
