@@ -1,67 +1,140 @@
-# Trouting
+# Trouting: an autorouter for KiCad
 
-Tommys routing: an autorouter for KiCad boards. It routes every net at once and
-lets contested spots get more expensive each round (negotiated congestion), so
-nets that have another way move away and the one that needs the spot keeps it.
-Plane nets (a pour over a quarter of a layer or more, usually GND) get a short
-track and a via into the pour per pad instead of being routed pad to pad.
+Trouting routes the tracks of a KiCad PCB for you. Give it a placed board with
+a GND pour; it routes every net, stitches GND into the pour with vias, writes
+the tracks back into the `.kicad_pcb` and runs KiCad's own DRC on the result.
 
-Nets wider than the Default class (power) may narrow to it where the full
-width doesn't fit, between fine-pitch pins say; the command lists where it did.
-What the rounds leave unjoined gets a rip-up-and-retry pass at the end.
+It is made for the boards most of us actually make: dense **2-layer boards with
+a ground pour**, QFNs, an ESP32 module, fine-pitch connectors.
 
-    trouting board.kicad_pcb                  # route in place (keeps board.kicad_pcb.trouting-bak)
-    trouting board.kicad_pcb -o routed.kicad_pcb
+- **All nets at once.** It doesn't route one net after another and get stuck
+  on the last few. Every net is routed every round, and spots that several
+  nets want get more expensive each round (negotiated congestion, the
+  PathFinder algorithm from FPGA routing). The net that has another way moves;
+  the one that needs the spot keeps it.
+- **Understands pours.** GND isn't routed pad to pad: each pad gets a short
+  track and a via into the pour. Trouting predicts how KiCad will fill the
+  zones, so it knows which bits of pour will be cut off, and stitches those
+  too. Thermal reliefs are checked the way KiCad's DRC checks them.
+- **Your board's rules.** Clearances, track widths and via sizes come from
+  the board's net classes (`.kicad_pro`) and custom rules (`.kicad_dru`).
+  Power nets keep their width where it fits and narrow only where it doesn't,
+  and you are told where.
+- **Checked by KiCad.** After routing, KiCad's DRC runs on the result and
+  Trouting reports any violation that wasn't there before.
+- **Native to KiCad.** No Java and no Specctra DSN/SES export and import. It
+  reads and writes the `.kicad_pcb` through KiCad's own Python module.
 
-Results on the ten test boards, each with its own rules (`test/bench.sh`;
-KiCad DRC of the result against the designer's own board):
+Status: young but working. It routes all ten real boards in its test set (below)
+to zero unconnected pads. It is developed on Linux with KiCad 9.
 
-| board | nets | unconnected | new DRC violations | time |
-|---|---|---|---|---|
-| `esp32` | 63 | 0 | 4 starved thermals, 4 isolated copper (a +3V3 pour) | 33 s |
-| `fob` | 64 | 0 (from 256) | 4 starved thermals | 2 min |
-| `gateway` | 63 | 0 | 3 starved thermals | 2 min |
-| `h2` | 54 | 0 | none | 3 min |
-| `han_esp` | 23 | 0 | none | 22 s |
-| `han_ttl` | 3 | 0 | none | 3 s |
-| `mbus` | 13 | 0 | none | 6 s |
-| `pool_v2` | 22 | 0 | 2 starved thermals | 29 s |
-| `pool_zb` | 31 | 0 | none | 40 s |
-| `water` | 35 | 0 | none | 62 s |
+## Install
 
-## Parts
+You need:
 
-- `trouting_kicad.py` – the only part that needs KiCad's Python (pcbnew):
-  `dump` reads a board into JSON, `apply` writes routed tracks and vias back
-  and refills the pours.
-- `trouting/board.py` – the board as a grid: exact distances to fixed copper,
-  the board edge, keepouts and holes; the terminals each net must join.
-- `trouting/core.c` – the A* search and the occupancy bookkeeping (compiled
-  with gcc on first use).
-- `trouting/router.py` – the rounds, plane stitching, repair and the result.
-- `trouting/render.py` – a PNG of the result.
+- **KiCad 9.** Tested with the snap (`sudo snap install kicad`). A normal
+  install should also work if your system Python can `import pcbnew`.
+- **Python 3.10 or newer** with numpy, scipy, shapely and Pillow.
+- **gcc.** The search core is a small C file, compiled the first time it runs.
 
-## Test boards
+```sh
+git clone https://github.com/TommyHolt/trouting.git
+cd trouting
+pip install -r requirements.txt
+```
 
-The boards are not in this repository (they are other people's designs or
-private). Put your own in `test/boards/` (`name.kicad_pcb`, with its
-`.kicad_pro` and `.kicad_dru` beside it so the net classes and rules come
-along); the folder is git-ignored. Judge a change on all of them, not on one.
-The results above are from these ten:
+## Use
 
-| board | what it tests |
+```sh
+./trouting.py board.kicad_pcb                      # route in place, keeps board.kicad_pcb.trouting-bak
+./trouting.py board.kicad_pcb -o routed.kicad_pcb  # write somewhere else
+./trouting.py board.kicad_pcb --keep-tracks        # keep the tracks already there, route the rest
+```
+
+Close the board in KiCad first, or reload it after. Keep the `.kicad_pro` (and
+`.kicad_dru`, if you have one) next to the `.kicad_pcb`: that is where the net
+classes and rules are. Tracks you have **locked** in KiCad are kept.
+
+It runs twelve router setups in parallel (one per core) and keeps the best: the
+fewest unrouted connections, then the fewest vias, then the shortest copper.
+A run looks like this:
+
+```
+reading mbus.kicad_pcb
+  dumped 2 copper layers, 50 footprints, 70 pads, 13 nets, 0 tracks, 0 vias
+board read: 1003 x 503 cells x 2 layers, 13 nets to join (0.8s)
+  setup via  8.0, plane 1.0:  0 unrouted,   0 vias,    184 mm  (1 rounds, 0s)
+  setup via  8.0, plane 1.5:  0 unrouted,  14 vias,    186 mm  (4 rounds, 1s)
+  ...
+best: via cost 8.0, plane cost 1.0
+  applied 66 tracks, 0 vias
+wrote mbus.kicad_pcb  (5s)
+
+all connections routed
+KiCad DRC: 0 unconnected pads (was 0)
+  no new violations
+```
+
+If something can't be routed, it lists the nets and the most crowded spots.
+
+## Results
+
+Ten real boards, each routed from scratch with its own rules (`test/bench.sh`).
+"Unconnected" and "new DRC violations" are from KiCad's DRC on the result.
+
+| board | what it is | nets | unconnected | new DRC violations | time |
+|---|---|---|---|---|---|
+| `h2` | ESP32-H2 dev board, 2-layer, many signal pours | 54 | 0 | none | 3 min |
+| `fob` | dense 2-layer, GND on the back, coil and antenna keepouts | 64 | 0 (from 256) | 4 starved thermals | 2 min |
+| `gateway` | 2-layer, GND both sides, QFNs, ESP module, custom rules | 63 | 0 | 3 starved thermals | 2 min |
+| `esp32` | ESP32 module board, KiCad 5 file | 63 | 0 | 4 starved thermals, 4 isolated copper | 33 s |
+| `water` | 2-layer sensor, locked tracks kept | 35 | 0 | none | 62 s |
+| `pool_zb` | small 2-layer sensor, GND both sides | 31 | 0 | none | 40 s |
+| `han_esp` | KiCad 5 file, NPTH pads with copper rings | 23 | 0 | none | 22 s |
+| `pool_v2` | small 2-layer sensor, GND both sides | 22 | 0 | 2 starved thermals | 29 s |
+| `mbus` | KiCad 4 file | 13 | 0 | none | 6 s |
+| `han_ttl` | KiCad 5 file | 3 | 0 | none | 3 s |
+
+Times are on a 24-thread Linux PC. A starved thermal is a GND pad that the pour
+reaches with fewer than two spokes, usually a QFN pin with no room around it.
+
+## Limitations
+
+What it doesn't do yet:
+
+- **4-layer boards** are not tested yet.
+- **Pours on nets other than the plane net** (a +3V3 pour, say) aren't
+  modelled, so they can be left with isolated copper.
+- **Differential pairs and length matching** are not supported.
+- **Placement suggestions are planned.** When a board can't be routed as
+  placed, Trouting will say which parts to move or rotate. For now it only
+  reports the crowded spots.
+
+Bug reports with a board attached are the most useful thing you can send.
+
+## How it works
+
+| file | what it does |
 |---|---|
-| `esp32` | KiCad 5 file, ESP32 module, signal-net pours |
-| `fob` | dense 2-layer, GND pour on the back, coil and antenna keepouts |
-| `gateway` | 2-layer, GND both sides, QFNs and an ESP module, custom rules (.kicad_dru) |
-| `h2` | ESP32-H2-DevKit-Lipo: 2-layer, hand-routed fully by its designer (so routable), many signal-net pours |
-| `han_esp`, `han_ttl` | KiCad 5 files, NPTH pads with copper rings |
-| `mbus` | an old KiCad 4 file |
-| `pool_v2`, `pool_zb` | small 2-layer sensor boards, GND both sides |
-| `water` | 2-layer with locked tracks kept from the designer |
+| `trouting_kicad.py` | The only part that needs KiCad's Python (pcbnew). `dump` reads a board into JSON; `apply` writes the tracks and vias back and refills the zones. |
+| `trouting/board.py` | The board as a grid at 0.05 mm: exact distance to fixed copper, board edge, keepouts and holes; the pads each net must join. |
+| `trouting/core.c` | A* search and the occupancy bookkeeping, in C. |
+| `trouting/router.py` | The negotiated-congestion rounds, GND stitching, the pour model, thermal checks, and rip-up and repair. |
+| `trouting/cli.py` | The command: runs the setups in parallel, applies the best, runs DRC before and after. |
 
-    test/bench.sh              # route them all with the trouting command; table in test/out/bench/summary.txt
-    test/bench.sh h2 fob       # just these
-    test/run.sh fob via_cost=8.0   # one setup, in-process (PNG, predicted pours), then KiCad's DRC
+## Developing
 
-KiCad is expected as the snap (`snap run --shell kicad`, `/snap/bin/kicad.kicad-cli`).
+Test boards are not part of the repository, because they are other people's
+designs. Put your own in `test/boards/`: the `.kicad_pcb` with its
+`.kicad_pro` and `.kicad_dru` next to it. The folder is git-ignored. Judge
+every change on all of them, not on one.
+
+```sh
+test/bench.sh                     # route them all; table in test/out/bench/summary.txt
+test/bench.sh h2 fob              # just these
+test/run.sh fob via_cost=8.0      # one setup, in-process (PNG of the result), then KiCad's DRC
+```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
