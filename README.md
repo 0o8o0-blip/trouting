@@ -13,13 +13,21 @@ What the rounds leave unjoined gets a rip-up-and-retry pass at the end.
     trouting board.kicad_pcb                  # route in place (keeps board.kicad_pcb.trouting-bak)
     trouting board.kicad_pcb -o routed.kicad_pcb
 
-Results on the test boards, with their own rules (KiCad DRC after routing):
+Results on the ten test boards, each with its own rules (`test/bench.sh`;
+KiCad DRC of the result against the designer's own board):
 
-| board | unconnected | new DRC violations | time |
-|---|---|---|---|
-| `fob` | 0 (from 256) | 12 starved thermals | ~1 min |
-| `h2` | 0 | none | ~4 min |
-| `mbus` | 0 | none | 5 s |
+| board | nets | unconnected | new DRC violations | time |
+|---|---|---|---|---|
+| `esp32` | 63 | 0 | 4 starved thermals, 4 isolated copper (a +3V3 pour) | 33 s |
+| `fob` | 64 | 0 (from 256) | 4 starved thermals | 2 min |
+| `gateway` | 63 | 0 | 3 starved thermals | 2 min |
+| `h2` | 54 | 0 | none | 3 min |
+| `han_esp` | 23 | 0 | none | 22 s |
+| `han_ttl` | 3 | 0 | none | 3 s |
+| `mbus` | 13 | 0 | none | 6 s |
+| `pool_v2` | 22 | 0 | 2 starved thermals | 29 s |
+| `pool_zb` | 31 | 0 | none | 40 s |
+| `water` | 35 | 0 | none | 62 s |
 
 ## Parts
 
@@ -35,14 +43,22 @@ Results on the test boards, with their own rules (KiCad DRC after routing):
 
 ## Test boards
 
-`test/` holds fixed copies of three boards used as benchmarks:
+`test/boards/` holds fixed copies of the boards used as benchmarks. Judge a
+change on all of them, not on one:
 
 | board | what it tests |
 |---|---|
+| `esp32` | KiCad 5 file, ESP32 module, signal-net pours |
 | `fob` | dense 2-layer, GND pour on the back, coil and antenna keepouts |
+| `gateway` | 2-layer, GND both sides, QFNs and an ESP module, custom rules (.kicad_dru) |
 | `h2` | ESP32-H2-DevKit-Lipo: 2-layer, hand-routed fully by its designer (so routable), many signal-net pours |
+| `han_esp`, `han_ttl` | KiCad 5 files, NPTH pads with copper rings |
 | `mbus` | an old KiCad 4 file |
+| `pool_v2`, `pool_zb` | small 2-layer sensor boards, GND both sides |
+| `water` | 2-layer with locked tracks kept from the designer |
 
-    test/run.sh fob        # route, write test/out/fob-routed.kicad_pcb, run KiCad's DRC
+    test/bench.sh              # route them all with the trouting command; table in test/out/bench/summary.txt
+    test/bench.sh h2 fob       # just these
+    test/run.sh fob via_cost=8.0   # one setup, in-process (PNG, predicted pours), then KiCad's DRC
 
 KiCad is expected as the snap (`snap run --shell kicad`, `/snap/bin/kicad.kicad-cli`).
