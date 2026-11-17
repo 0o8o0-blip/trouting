@@ -1,6 +1,6 @@
 # Trouting: an autorouter for KiCad
 
-Trouting routes the tracks of a KiCad PCB for you. Give it a placed board with
+Trouting (short for *Tommy's routing*) routes the tracks of a KiCad PCB for you. Give it a placed board with
 a GND pour; it routes every net, stitches GND into the pour with vias, writes
 the tracks back into the `.kicad_pcb` and runs KiCad's own DRC on the result.
 
