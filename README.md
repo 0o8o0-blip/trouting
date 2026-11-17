@@ -25,8 +25,8 @@ a ground pour**, QFNs, an ESP32 module, fine-pitch connectors.
 - **Native to KiCad.** No Java and no Specctra DSN/SES export and import. It
   reads and writes the `.kicad_pcb` through KiCad's own Python module.
 
-Status: young but working. It routes all ten real boards in its test set (below)
-to zero unconnected pads. It is developed on Linux with KiCad 9.
+Status: young but working. It routes all ten real boards in its test set to zero
+unconnected pads (see Results). It is developed on Linux with KiCad 9.
 
 ## Install
 
@@ -49,6 +49,7 @@ pip install -r requirements.txt
 ./trouting.py board.kicad_pcb                      # route in place, keeps board.kicad_pcb.trouting-bak
 ./trouting.py board.kicad_pcb -o routed.kicad_pcb  # write somewhere else
 ./trouting.py board.kicad_pcb --keep-tracks        # keep the tracks already there, route the rest
+./trouting.py board.kicad_pcb --png routed.png     # also draw the result: front red, back blue, vias white
 ```
 
 Close the board in KiCad first, or reload it after. Keep the `.kicad_pro` (and
@@ -60,7 +61,7 @@ fewest unrouted connections, then the fewest vias, then the shortest copper.
 A run looks like this:
 
 ```
-reading mbus.kicad_pcb
+reading board.kicad_pcb
   dumped 2 copper layers, 50 footprints, 70 pads, 13 nets, 0 tracks, 0 vias
 board read: 1003 x 503 cells x 2 layers, 13 nets to join (0.8s)
   setup via  8.0, plane 1.0:  0 unrouted,   0 vias,    184 mm  (1 rounds, 0s)
@@ -68,7 +69,7 @@ board read: 1003 x 503 cells x 2 layers, 13 nets to join (0.8s)
   ...
 best: via cost 8.0, plane cost 1.0
   applied 66 tracks, 0 vias
-wrote mbus.kicad_pcb  (5s)
+wrote board.kicad_pcb  (5s)
 
 all connections routed
 KiCad DRC: 0 unconnected pads (was 0)
@@ -79,24 +80,13 @@ If something can't be routed, it lists the nets and the most crowded spots.
 
 ## Results
 
-Ten real boards, each routed from scratch with its own rules (`test/bench.sh`).
-"Unconnected" and "new DRC violations" are from KiCad's DRC on the result.
-
-| board | what it is | nets | unconnected | new DRC violations | time |
-|---|---|---|---|---|---|
-| `h2` | ESP32-H2 dev board, 2-layer, many signal pours | 54 | 0 | none | 3 min |
-| `fob` | dense 2-layer, GND on the back, coil and antenna keepouts | 64 | 0 (from 256) | 4 starved thermals | 2 min |
-| `gateway` | 2-layer, GND both sides, QFNs, ESP module, custom rules | 63 | 0 | 3 starved thermals | 2 min |
-| `esp32` | ESP32 module board, KiCad 5 file | 63 | 0 | 4 starved thermals, 4 isolated copper | 33 s |
-| `water` | 2-layer sensor, locked tracks kept | 35 | 0 | none | 62 s |
-| `pool_zb` | small 2-layer sensor, GND both sides | 31 | 0 | none | 40 s |
-| `han_esp` | KiCad 5 file, NPTH pads with copper rings | 23 | 0 | none | 22 s |
-| `pool_v2` | small 2-layer sensor, GND both sides | 22 | 0 | 2 starved thermals | 29 s |
-| `mbus` | KiCad 4 file | 13 | 0 | none | 6 s |
-| `han_ttl` | KiCad 5 file | 3 | 0 | none | 3 s |
-
-Times are on a 24-thread Linux PC. A starved thermal is a GND pad that the pour
-reaches with fewer than two spokes, usually a QFN pin with no room around it.
+Trouting is tested on ten real boards, routed from scratch with each board's
+own rules. They are 2-layer boards with 3 to 64 nets, in files from KiCad 4
+to 9. KiCad's DRC finds **no unconnected pads** on any of them. The new DRC
+warnings are a few starved thermals (GND pads, usually QFN pins, that the pour
+reaches with fewer than two spokes), plus isolated copper on one board from a
+pour that isn't GND (see Limitations). A board takes from a few seconds to
+about three minutes on a 24-thread Linux PC.
 
 ## Limitations
 
@@ -131,8 +121,8 @@ every change on all of them, not on one.
 
 ```sh
 test/bench.sh                     # route them all; table in test/out/bench/summary.txt
-test/bench.sh h2 fob              # just these
-test/run.sh fob via_cost=8.0      # one setup, in-process (PNG of the result), then KiCad's DRC
+test/bench.sh mine other          # just these (test/boards/mine.kicad_pcb, ...)
+test/run.sh mine via_cost=8.0     # one setup, in-process (PNG of the result), then KiCad's DRC
 ```
 
 ## License

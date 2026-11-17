@@ -1,13 +1,15 @@
-"""trouting: route a KiCad board.
+"""trouting: an autorouter for KiCad boards.
 
-    trouting board.kicad_pcb                 route it in place (a backup is kept)
-    trouting board.kicad_pcb -o routed.kicad_pcb
-    trouting board.kicad_pcb --keep-tracks   route only what isn't routed yet
+examples:
+  trouting board.kicad_pcb                      route in place (keeps board.kicad_pcb.trouting-bak)
+  trouting board.kicad_pcb -o routed.kicad_pcb  write the result somewhere else
+  trouting board.kicad_pcb --keep-tracks        keep the existing tracks, route the rest
+  trouting board.kicad_pcb --png routed.png     also draw the result
 
-Several router setups run at once (one per core, up to --tries) and the best
-result is kept: fewest unrouted connections, then fewest vias, then the
-shortest copper. KiCad's DRC is run on the result and compared with the board
-as it was.
+Close the board in KiCad first (or reload it after). Several router setups run
+at once and the best result is kept: fewest unrouted connections, then fewest
+vias, then the shortest copper. KiCad's DRC runs on the result, and any
+violation that wasn't on the board before is listed.
 """
 import argparse
 import json
@@ -81,6 +83,7 @@ def drc(cli, pcb, work, name):
 
 # ---- routing, several setups at once ----
 _BOARD = None
+_PNG_DIR = None                                  # set when --png is asked for: each setup draws its result here
 
 
 def _route(setup):
@@ -96,13 +99,19 @@ def _route(setup):
     n_unrouted = len(out["unrouted"])
     hot = [[float(_BOARD.cx(v % _BOARD.WH % _BOARD.W)), float(_BOARD.cy(v % _BOARD.WH // _BOARD.W))]
            for h in r.hot for v in h[:1]]
-    return {"setup": setup, "out": out, "unrouted": n_unrouted, "vias": len(out["vias"]),
+    png = None
+    if _PNG_DIR:
+        from .render import render
+        png = os.path.join(_PNG_DIR, "setup-%g-%g.png" % setup)
+        render(r, png)
+    return {"setup": setup, "out": out, "unrouted": n_unrouted, "vias": len(out["vias"]), "png": png,
             "length": round(length, 1), "hot": hot, "rounds": len(r.history), "secs": round(time.time() - t, 1),
             "stitches": getattr(r, "stitches", 0)}
 
 
-def route_portfolio(board_json, tries, jobs, log):
-    global _BOARD
+def route_portfolio(board_json, tries, jobs, log, png_dir=None):
+    global _BOARD, _PNG_DIR
+    _PNG_DIR = png_dir
     from .board import Board
     t = time.time()
     _BOARD = Board(json.load(open(board_json)))
@@ -134,13 +143,21 @@ def route_portfolio(board_json, tries, jobs, log):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="trouting", description=__doc__.split("\n\n")[0])
-    ap.add_argument("board")
-    ap.add_argument("-o", "--output", help="write here instead of over the board (which then gets a backup)")
-    ap.add_argument("--keep-tracks", action="store_true", help="keep the tracks already there, route the rest")
-    ap.add_argument("--tries", type=int, default=len(SETUPS), help="router setups to try (default %(default)s)")
-    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4, help="at once (default: all cores)")
-    ap.add_argument("--png", help="also draw the result to this PNG")
+    head, _, rest = __doc__.partition("\n\n")
+    ap = argparse.ArgumentParser(prog="trouting", description="Trouting: " + head.split(": ", 1)[1], epilog=rest,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("board", help="the .kicad_pcb to route (its .kicad_pro and .kicad_dru are read from beside it)")
+    ap.add_argument("-o", "--output", metavar="FILE",
+                    help="write the routed board here instead of over BOARD (routing in place keeps a .trouting-bak)")
+    ap.add_argument("--keep-tracks", action="store_true",
+                    help="keep the tracks and vias already on the board and route only what is missing "
+                         "(by default only locked tracks are kept)")
+    ap.add_argument("--tries", type=int, default=len(SETUPS), metavar="N",
+                    help="router setups to try, best result kept (1-%d, default %%(default)s)" % len(SETUPS))
+    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4, metavar="N",
+                    help="setups to run at the same time (default: one per core, %(default)s here)")
+    ap.add_argument("--png", metavar="FILE",
+                    help="also draw the routed board to this PNG: front tracks red, back blue, vias white")
     a = ap.parse_args(argv)
     log = lambda m: print(m, flush=True)
 
@@ -164,7 +181,7 @@ def main(argv=None):
             log("  " + l)
         before, before_unc = drc(cli, w_src, work, "before")
 
-        best = route_portfolio(j, a.tries, a.jobs, log)
+        best = route_portfolio(j, a.tries, a.jobs, log, work if a.png else None)
         routes = os.path.join(work, "routes.json")
         json.dump(best["out"], open(routes, "w"))
         w_out = os.path.join(work, "out.kicad_pcb")
@@ -179,8 +196,9 @@ def main(argv=None):
             log("backup: %s" % bak)
         shutil.copy(w_out, out)
         log("wrote %s  (%.0fs)" % (out, time.time() - t0))
-        if a.png:
-            log("(--png needs the router in this process; see test/t_route.py)")
+        if a.png and best.get("png"):
+            shutil.copy(best["png"], a.png)
+            log("drew %s" % a.png)
 
         # report
         u = best["out"]["unrouted"]

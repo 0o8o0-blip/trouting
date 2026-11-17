@@ -1,7 +1,7 @@
 #!/bin/bash
 # route every board in test/boards with the trouting command and tabulate the results
 #   test/bench.sh            all boards
-#   test/bench.sh h2 fob     just these
+#   test/bench.sh mine other     just these (test/boards/mine.kicad_pcb, ...)
 cd "$(dirname "$0")"
 out=out/bench; mkdir -p $out
 boards=${@:-$(ls boards/*.kicad_pcb | xargs -n1 basename | sed 's/.kicad_pcb//')}

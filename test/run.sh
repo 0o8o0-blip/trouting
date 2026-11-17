@@ -1,6 +1,6 @@
 #!/bin/bash
 # route a test board end to end with one setup: route, write into a copy, KiCad DRC
-#   test/run.sh h2 via_cost=8.0 plane_layer_cost=2.5
+#   test/run.sh mine via_cost=8.0 plane_layer_cost=2.5
 set -eo pipefail
 cd ~/claude/tracer/test
 b=$1; shift
