@@ -108,7 +108,7 @@ def dump(board, path, rip_up):
         for p in f.Pads():
             if p.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH:
                 dr = p.GetDrillSize()
-                d["holes"].append({"at": pt(p.GetPosition()), "r": mm(max(dr.x, dr.y)) / 2})
+                d["holes"].append({"ref": ref, "at": pt(p.GetPosition()), "r": mm(max(dr.x, dr.y)) / 2})
                 # an NPTH pad bigger than its hole has a ring of copper (of no net), which
                 # DRC keeps the pad's clearance from: it goes on as a net-less pad
             npth = p.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH
@@ -137,7 +137,7 @@ def dump(board, path, rip_up):
             if isinstance(g, pcbnew.PCB_SHAPE) and g.IsOnCopperLayer() and g.GetLayer() in cu:
                 ps = pcbnew.SHAPE_POLY_SET()
                 g.TransformShapeToPolygon(ps, g.GetLayer(), 0, EPS, pcbnew.ERROR_INSIDE)
-                d["copper_shapes"].append({"layer": board.GetLayerName(g.GetLayer()),
+                d["copper_shapes"].append({"ref": ref, "layer": board.GetLayerName(g.GetLayer()),
                                            "net": g.GetNetname() if hasattr(g, "GetNetname") else "",
                                            "polys": polys(ps)})
     for g in board.GetDrawings():
@@ -147,22 +147,22 @@ def dump(board, path, rip_up):
             d["copper_shapes"].append({"layer": board.GetLayerName(g.GetLayer()),
                                        "net": g.GetNetname(), "polys": polys(ps)})
 
-    zones = list(board.Zones())
+    zones = [(z, None) for z in board.Zones()]
     for f in board.GetFootprints():
-        zones += list(f.Zones())
-    for z in zones:
+        zones += [(z, f.GetReference()) for z in f.Zones()]      # these move with their footprint
+    for z, zref in zones:
         if rip_up and z.IsTeardropArea():
             continue                 # teardrops belong to the tracks being ripped up
         zl = [n for l, n in zip(cu, names) if z.GetLayerSet().Contains(l)]
         if z.GetIsRuleArea():
-            d["keepouts"].append({"name": z.GetZoneName(), "layers": zl,
+            d["keepouts"].append({"ref": zref, "name": z.GetZoneName(), "layers": zl,
                                   "tracks": z.GetDoNotAllowTracks(), "vias": z.GetDoNotAllowVias(),
                                   "pads": z.GetDoNotAllowPads(), "pours": z.GetDoNotAllowZoneFills() if hasattr(z, "GetDoNotAllowZoneFills") else z.GetDoNotAllowCopperPour(),
                                   "polys": polys(z.Outline())})
         elif zl:
             lc = z.GetLocalClearance()
             lc = lc.value() if hasattr(lc, "value") else lc      # KiCad 9: std::optional
-            d["pours"].append({"net": z.GetNetname(), "layers": zl, "priority": z.GetAssignedPriority(),
+            d["pours"].append({"ref": zref, "net": z.GetNetname(), "layers": zl, "priority": z.GetAssignedPriority(),
                                "clearance": mm(lc or 0), "min_width": mm(z.GetMinThickness()),
                                "thermal_gap": mm(z.GetThermalReliefGap()),
                                "spoke_width": mm(z.GetThermalReliefSpokeWidth()),
@@ -231,6 +231,15 @@ def fills(board, path):
 
 def apply(board, path, out, rip_up):
     r = json.load(open(path))
+    apply_routes(board, r, rip_up)
+    board.Save(out)
+    print("applied %d tracks, %d vias -> %s" % (len(r["tracks"]), len(r["vias"]), out), flush=True)
+
+
+def apply_routes(board, r, rip_up):
+    """Put routes {"tracks", "vias"} on the board (taking the unlocked copper off
+    first, with rip_up) and refill the zones. Returns the new items."""
+    new = []
     nets = {n.GetNetname(): n for n in board.GetNetsByNetcode().values()}
     lid = {board.GetLayerName(l): l for l in copper_layers(board)}
     if rip_up:
@@ -249,6 +258,7 @@ def apply(board, path, out, rip_up):
         s.SetStart(P(t["a"])); s.SetEnd(P(t["b"])); s.SetWidth(pcbnew.FromMM(t["w"]))
         s.SetLayer(lid[t["layer"]]); s.SetNet(nets[t["net"]])
         board.Add(s)
+        new.append(s)
     for v in r["vias"]:
         s = pcbnew.PCB_VIA(board)
         s.SetPosition(P(v["at"])); s.SetWidth(pcbnew.FromMM(v["d"])); s.SetDrill(pcbnew.FromMM(v["drill"]))
@@ -256,11 +266,11 @@ def apply(board, path, out, rip_up):
         s.SetLayerPair(lid.get(a, pcbnew.F_Cu), lid.get(b, pcbnew.B_Cu))
         s.SetNet(nets[v["net"]])
         board.Add(s)
+        new.append(s)
     if len(board.Zones()):
         filler = pcbnew.ZONE_FILLER(board)       # keep it referenced while it fills (a temporary crashes)
         filler.Fill(board.Zones())
-    board.Save(out)
-    print("applied %d tracks, %d vias -> %s" % (len(r["tracks"]), len(r["vias"]), out), flush=True)
+    return new
 
 
 if __name__ == "__main__":

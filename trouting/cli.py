@@ -99,13 +99,16 @@ def _route(setup):
     n_unrouted = len(out["unrouted"])
     hot = [[float(_BOARD.cx(v % _BOARD.WH % _BOARD.W)), float(_BOARD.cy(v % _BOARD.WH // _BOARD.W))]
            for h in r.hot for v in h[:1]]
+    # where the fights were, more finely (for the placement suggestions)
+    hot_all = [[float(_BOARD.cx(int(v) % _BOARD.WH % _BOARD.W)), float(_BOARD.cy(int(v) % _BOARD.WH // _BOARD.W))]
+               for h in r.hot for v in h[:: max(1, len(h) // 20)]]
     png = None
     if _PNG_DIR:
         from .render import render
         png = os.path.join(_PNG_DIR, "setup-%g-%g.png" % setup)
         render(r, png)
     return {"setup": setup, "out": out, "unrouted": n_unrouted, "vias": len(out["vias"]), "png": png,
-            "length": round(length, 1), "hot": hot, "rounds": len(r.history), "secs": round(time.time() - t, 1),
+            "length": round(length, 1), "hot": hot, "hot_all": hot_all, "rounds": len(r.history), "secs": round(time.time() - t, 1),
             "stitches": getattr(r, "stitches", 0)}
 
 
@@ -156,6 +159,8 @@ def main(argv=None):
                     help="router setups to try, best result kept (1-%d, default %%(default)s)" % len(SETUPS))
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4, metavar="N",
                     help="setups to run at the same time (default: one per core, %(default)s here)")
+    ap.add_argument("--no-suggest", action="store_true",
+                    help="if the board doesn't route fully, don't look for parts to move or rotate")
     ap.add_argument("--png", metavar="FILE",
                     help="also draw the routed board to this PNG: front tracks red, back blue, vias white")
     a = ap.parse_args(argv)
@@ -200,6 +205,16 @@ def main(argv=None):
             shutil.copy(best["png"], a.png)
             log("drew %s" % a.png)
 
+        # a board that didn't route: which part to move or rotate (each checked by routing)
+        sugg = None
+        if best["out"]["unrouted"] and not a.no_suggest:
+            from .suggest import suggest
+            log("\nlooking for parts to move or rotate:")
+            planes = {_BOARD.net_names[n] for n in _BOARD.planes}
+            budget = max(60.0, 2.0 * best["secs"])
+            sugg = suggest(_BOARD.d, planes, best["out"]["unrouted"], best["hot_all"], best["setup"],
+                           a.jobs, log, res=_BOARD.res, budget=budget)
+
         # report
         u = best["out"]["unrouted"]
         if u:
@@ -208,6 +223,13 @@ def main(argv=None):
                 log("  %-24s %s" % (x["net"], ", ".join(x.get("pads", [])) or "(crowded)"))
             if best["hot"]:
                 log("  crowded at: " + "; ".join("(%.2f, %.2f)" % tuple(h) for h in best["hot"][:6]))
+            if sugg:
+                log("to make it route, move or rotate a part (each checked by routing the board with it):")
+                for g in sugg[:5]:
+                    left = "routes fully" if not g["unrouted"] else "%d left unrouted" % g["unrouted"]
+                    log("  %-50s %s" % (g["text"], left))
+            elif sugg is not None:
+                log("no single move or rotation of a nearby part made it route better")
         else:
             log("\nall connections routed")
         # where wide nets had to narrow (a designer will want to know: current)

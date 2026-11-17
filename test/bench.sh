@@ -9,8 +9,8 @@ sum=$out/summary.txt; : > $sum
 for b in $boards; do
   t=$(date +%s)
   timeout 1200 python3 ../trouting.py boards/$b.kicad_pcb -o $out/$b.kicad_pcb > $out/$b.log 2>&1
-  for x in kicad_pro kicad_dru; do [ -f boards/$b.$x ] && cp boards/$b.$x $out/$b.$x; done   # rules, so KiCad opens the result right
   rc=$?
+  for x in kicad_pro kicad_dru; do [ -f boards/$b.$x ] && cp boards/$b.$x $out/$b.$x; done   # rules, so KiCad opens the result right
   secs=$(( $(date +%s) - t ))
   nets=$(grep -o '[0-9]* nets to join' $out/$b.log | cut -d' ' -f1)
   unr=$(grep -q 'all connections routed' $out/$b.log && echo 0 || grep -o 'not routed ([0-9]*)' $out/$b.log | grep -o '[0-9]*')

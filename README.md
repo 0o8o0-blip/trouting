@@ -89,7 +89,26 @@ KiCad DRC: 0 unconnected pads (was 0)
   no new violations
 ```
 
-If something can't be routed, it lists the nets and the most crowded spots.
+### When a board can't be routed as placed
+
+Then Trouting looks for a part to move or rotate. It takes the parts near the
+connections it couldn't make and tries turning them and shifting them by 0.5
+to 2 mm, keeping them clear of the other parts and as far inside the board as
+they were. It ranks the moves by how much shorter and less tangled the
+ratsnest gets, then routes the whole board with each of the best ones. Only
+moves that leave fewer connections unrouted are listed:
+
+```
+not routed (3):
+  +3.3VP                   U2.13
+  Net-(R1-Pad2)            U2.14
+  Net-(R6-Pad2)            U2.20
+to make it route, move or rotate a part (each checked by routing the board with it):
+  move U2 2.0 mm right and down (to 65.41, 96.91)    routes fully
+  rotate U2 90° counter-clockwise (to -90°)          routes fully
+```
+
+This takes about as long again as the routing. `--no-suggest` skips it.
 
 ## Results
 
@@ -109,9 +128,8 @@ What it doesn't do yet:
 - **Pours on nets other than the plane net** (a +3V3 pour, say) aren't
   modelled, so they can be left with isolated copper.
 - **Differential pairs and length matching** are not supported.
-- **Placement suggestions are planned.** When a board can't be routed as
-  placed, Trouting will say which parts to move or rotate. For now it only
-  reports the crowded spots.
+- **Placement suggestions move one part at a time.** A board that needs two
+  parts moved gets the move that helps most, and you run it again.
 
 Bug reports with a board attached are the most useful thing you can send.
 
@@ -136,6 +154,8 @@ every change on all of them, not on one.
 test/bench.sh                     # route them all; table in test/out/bench/summary.txt
 test/bench.sh mine other          # just these (test/boards/mine.kicad_pcb, ...)
 test/run.sh mine via_cost=8.0     # one setup, in-process (PNG of the result), then KiCad's DRC
+python3 test/t_suggest.py mine scan          # turn each part, list the turns that stop it routing
+python3 test/t_suggest.py mine fix U2:270    # break it so, then see what the suggestions find
 ```
 
 ## License

@@ -6,3 +6,7 @@ test/**/*.json
 *-backups/
 fp-info-cache
 test/boards/
+examples/**/*.json
+plugin/_deps/
+dist/
+trouting/prebuilt/

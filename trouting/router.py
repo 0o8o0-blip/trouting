@@ -533,6 +533,8 @@ class Router:
         """A* from src to tgt inside a box around tgt and the source cell nearest
         to it, grown by each of grows (mm; None = the whole board) until it works."""
         b, p = self.b, self.per[n]
+        if not len(src) or not len(tgt):
+            return None              # a pad with no cell on the board (off its edge): can't be reached
         tbox = self.bbox_of(tgt, 0)
         tx, ty = (tbox[0] + tbox[2]) / 2, (tbox[1] + tbox[3]) / 2
         sxy = src % b.WH
