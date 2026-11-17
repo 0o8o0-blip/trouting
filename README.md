@@ -4,6 +4,12 @@ Trouting (short for *Tommy's routing*) routes the tracks of a KiCad PCB for you.
 a GND pour; it routes every net, stitches GND into the pour with vias, writes
 the tracks back into the `.kicad_pcb` and runs KiCad's own DRC on the result.
 
+![A small USB-C microcontroller board routed by Trouting: front tracks red, the GND pour on the back blue](docs/demo.png)
+
+*The demo board in `examples/demo/`, routed by Trouting in 24 seconds: 25
+nets, every pad connected, no new DRC violations. Red is the front, blue is the GND
+pour on the back with the back-side tracks cut into it.*
+
 It is made for the boards most of us actually make: dense **2-layer boards with
 a ground pour**, QFNs, an ESP32 module, fine-pitch connectors.
 
@@ -50,6 +56,13 @@ pip install -r requirements.txt
 ./trouting.py board.kicad_pcb -o routed.kicad_pcb  # write somewhere else
 ./trouting.py board.kicad_pcb --keep-tracks        # keep the tracks already there, route the rest
 ./trouting.py board.kicad_pcb --png routed.png     # also draw the result: front red, back blue, vias white
+```
+
+To try it on the demo board (a made-up USB-C microcontroller board, placed
+but not routed):
+
+```sh
+./trouting.py examples/demo/demo.kicad_pcb -o demo-routed.kicad_pcb
 ```
 
 Close the board in KiCad first, or reload it after. Keep the `.kicad_pro` (and
