@@ -1,5 +1,6 @@
-import json, sys, time
-sys.path.insert(0, '/home/tommy/claude/tracer')
+import json, os, sys, time
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 from trouting.board import Board
 from trouting.router import Router, Options
 from trouting.render import render
@@ -15,7 +16,7 @@ for a in sys.argv[2:]:                       # rounds, or option=value (res=0.02
     else:
         o.max_rounds = int(a)
 t = time.time()
-b = Board(json.load(open(f'/home/tommy/claude/tracer/test/boards/{name}.json')), res=o.res)
+b = Board(json.load(open(f'{ROOT}/test/boards/{name}.json')), res=o.res)
 print(f'board {time.time()-t:.1f}s')
 r = Router(b, o)
 print(f'router setup {time.time()-t:.1f}s, {len(r.nets)} nets to route, classes {r.tcls} {r.vcls}')
@@ -24,8 +25,8 @@ out = r.result()
 print(f'done {time.time()-t:.1f}s: {len(out["tracks"])} tracks, {len(out["vias"])} vias, {len(out["unrouted"])} unrouted')
 for u in out['unrouted']:
     print('  ', u)
-json.dump(out, open(f'/home/tommy/claude/tracer/test/out/{tag}-routes.json', 'w'))
-render(r, f'/home/tommy/claude/tracer/test/out/{tag}-routed.png')
+json.dump(out, open(f'{ROOT}/test/out/{tag}-routes.json', 'w'))
+render(r, f'{ROOT}/test/out/{tag}-routed.png')
 # what the router believes the plane net pours will fill (for comparing with KiCad's)
 import numpy as np
 pred = {}
@@ -38,4 +39,4 @@ for n in r.plane_mask:
             lab, group, _ = r.pour_pieces(n, l, mask)
             pred[f'{b.net_names[n]}|{b.layers[l]}'] = lab > 0
     r.stamp(n, +1)
-np.savez_compressed(f'/home/tommy/claude/tracer/test/out/{tag}-pred.npz', ox=b.ox, oy=b.oy, res=b.res, W=b.W, H=b.H, **pred)
+np.savez_compressed(f'{ROOT}/test/out/{tag}-pred.npz', ox=b.ox, oy=b.oy, res=b.res, W=b.W, H=b.H, **pred)

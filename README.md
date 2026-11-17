@@ -43,8 +43,11 @@ KiCad DRC of the result against the designer's own board):
 
 ## Test boards
 
-`test/boards/` holds fixed copies of the boards used as benchmarks. Judge a
-change on all of them, not on one:
+The boards are not in this repository (they are other people's designs or
+private). Put your own in `test/boards/` (`name.kicad_pcb`, with its
+`.kicad_pro` and `.kicad_dru` beside it so the net classes and rules come
+along); the folder is git-ignored. Judge a change on all of them, not on one.
+The results above are from these ten:
 
 | board | what it tests |
 |---|---|

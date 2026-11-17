@@ -5,3 +5,4 @@ test/**/*.json
 *.kicad_prl
 *-backups/
 fp-info-cache
+test/boards/

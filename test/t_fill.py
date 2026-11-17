@@ -1,14 +1,15 @@
 """Compare the router's predicted pour fill (out/<b>-pred.npz) with KiCad's (out/<b>-fills.json).
 Writes out/<b>-fill-<net>-<layer>.png: green both, red KiCad only, blue predicted only."""
-import json, sys
+import json, os, sys
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 import numpy as np, shapely
 from shapely.geometry import Polygon
 from PIL import Image
 name = sys.argv[1]
-P = np.load(f'/home/tommy/claude/tracer/test/out/{name}-pred.npz')
+P = np.load(f'{ROOT}/test/out/{name}-pred.npz')
 ox, oy, res, W, H = float(P['ox']), float(P['oy']), float(P['res']), int(P['W']), int(P['H'])
 X, Y = np.meshgrid(ox + (np.arange(W) + 0.5) * res, oy + (np.arange(H) + 0.5) * res)
-fills = json.load(open(f'/home/tommy/claude/tracer/test/out/{name}-fills.json'))
+fills = json.load(open(f'{ROOT}/test/out/{name}-fills.json'))
 for key in P.files:
     if '|' not in key:
         continue
@@ -22,5 +23,5 @@ for key in P.files:
     img[real & pred] = (120, 200, 120)
     img[real & ~pred] = (230, 60, 60)
     img[~real & pred] = (60, 90, 230)
-    Image.fromarray(img).save(f'/home/tommy/claude/tracer/test/out/{name}-fill-{net.strip("/")}-{layer}.png')
+    Image.fromarray(img).save(f'{ROOT}/test/out/{name}-fill-{net.strip("/")}-{layer}.png')
     print(f'{key}: KiCad filled {real.sum()} cells, predicted {pred.sum()}, predicted but not filled {(pred & ~real).sum()}')

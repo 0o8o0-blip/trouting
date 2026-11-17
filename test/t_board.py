@@ -1,11 +1,12 @@
-import json, sys, time
-sys.path.insert(0, '/home/tommy/claude/tracer')
+import json, os, sys, time
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 import numpy as np
 from PIL import Image
 from trouting.board import Board
 name = sys.argv[1]
 t = time.time()
-b = Board(json.load(open(f'/home/tommy/claude/tracer/test/{name}.json')))
+b = Board(json.load(open(f'{ROOT}/test/boards/{name}.json')))
 print(f'{name}: grid {b.W}x{b.H}x{b.L} built in {time.time()-t:.1f}s, rmax {b.rmax:.2f}')
 print('planes', {b.net_names[n]: b.layers[l] for n, (l, _) in b.planes.items()})
 nt = {b.net_names[n]: len(ts) for n, ts in b.terminals.items()}
@@ -28,4 +29,4 @@ for l in range(b.L):
     d = b.d1[l*b.WH:(l+1)*b.WH].reshape(b.H, b.W)
     img = np.where(d < 0.11, 60, 230).astype(np.uint8)
     img[d < 0] = 0
-    Image.fromarray(img).save(f'/home/tommy/claude/tracer/test/out/{name}-static-{b.layers[l]}.png')
+    Image.fromarray(img).save(f'{ROOT}/test/out/{name}-static-{b.layers[l]}.png')
