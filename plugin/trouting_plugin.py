@@ -62,9 +62,15 @@ def child_env():
     return env
 
 
+def boot(code):
+    """`python -c` code that first puts our folders on sys.path: KiCad's Python on
+    Windows ignores PYTHONPATH (spawned workers inherit sys.path from it)."""
+    return "import sys; sys.path[:0] = %r; %s" % ([DEPS, ROOT], code)
+
+
 def deps_error(py):
     """Why the router's Python can't import its packages (None: it can)."""
-    r = subprocess.run([py, "-c", "import " + ", ".join(NEEDED)], env=child_env(), capture_output=True,
+    r = subprocess.run([py, "-c", boot("import " + ", ".join(NEEDED))], env=child_env(), capture_output=True,
                        text=True, encoding="utf-8", errors="replace", **NO_WINDOW)
     return None if r.returncode == 0 else (r.stderr.strip() or "exit code %d" % r.returncode)
 
@@ -135,7 +141,8 @@ def route_board(board, py, keep_tracks=False, suggest=True, tries=12, poll=lambd
     try:
         bj, rj = os.path.join(work, "board.json"), os.path.join(work, "result.json")
         trouting_kicad.dump(board, bj, rip_up=not keep_tracks)
-        cmd = [py, "-u", "-m", "trouting.job", bj, rj, "--tries", str(tries), "--jobs", os.environ.get("TROUTING_JOBS") or str(os.cpu_count() or 4)]
+        job = "import runpy; runpy.run_module('trouting.job', run_name='__main__', alter_sys=True)"
+        cmd = [py, "-u", "-c", boot(job), bj, rj, "--tries", str(tries), "--jobs", os.environ.get("TROUTING_JOBS") or str(os.cpu_count() or 4)]
         if not suggest:
             cmd.append("--no-suggest")
         ch = Child(cmd)
