@@ -45,6 +45,9 @@ jobs:
           $bin = "C:\Program Files\KiCad\9.0\bin"
           & "$bin\python.exe" -c "import sys, pcbnew; print(sys.version); print('pcbnew', pcbnew.Version())"
           & "$bin\kicad-cli.exe" version
+          & "$bin\python.exe" -c "import sys; print('flags: ignore_environment', sys.flags.ignore_environment, 'isolated', sys.flags.isolated); print('prefix', sys.prefix); print('path', sys.path)"
+          Get-ChildItem "$bin\*._pth", "$bin\..\*._pth" -ErrorAction SilentlyContinue | ForEach-Object { "pth: $_"; Get-Content $_ }
+          $env:PYTHONPATH = "C:\nowhere"; & "$bin\python.exe" -c "import sys; print('PYTHONPATH honoured:', 'C:\\nowhere' in sys.path)"; Remove-Item Env:PYTHONPATH
 
       - name: Unpack the plugin as KiCad would
         run: |
@@ -55,7 +58,7 @@ jobs:
         run: |
           $py = "C:\Program Files\KiCad\9.0\bin\python.exe"
           $plug = "$env:RUNNER_TEMP\pcm\plugins"
-          & $py -c "import sys, subprocess; sys.path.insert(0, r'$plug'); import trouting_plugin as tp; py = tp.find_python(); print('router python:', py); print('packages before:', tp.deps_ok(py)); subprocess.check_call(tp.install_cmd(py)); print('packages after:', tp.deps_ok(py)); assert tp.deps_ok(py)"
+          & $py -c "import sys, subprocess; sys.path.insert(0, r'$plug'); import trouting_plugin as tp; py = tp.find_python(); print('router python:', py); print('packages before:', tp.deps_ok(py)); subprocess.check_call(tp.install_cmd(py)); print('packages after:', tp.deps_error(py) or 'all there'); assert tp.deps_ok(py)"
 
       - name: Plugin pipeline on the stuck demo - route, suggest, move, route again
         run: |

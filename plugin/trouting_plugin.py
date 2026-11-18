@@ -62,9 +62,15 @@ def child_env():
     return env
 
 
+def deps_error(py):
+    """Why the router's Python can't import its packages (None: it can)."""
+    r = subprocess.run([py, "-c", "import " + ", ".join(NEEDED)], env=child_env(), capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", **NO_WINDOW)
+    return None if r.returncode == 0 else (r.stderr.strip() or "exit code %d" % r.returncode)
+
+
 def deps_ok(py):
-    r = subprocess.run([py, "-c", "import " + ", ".join(NEEDED)], env=child_env(), capture_output=True, **NO_WINDOW)
-    return r.returncode == 0
+    return deps_error(py) is None
 
 
 def install_cmd(py):
