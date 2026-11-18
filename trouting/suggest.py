@@ -296,6 +296,10 @@ def screen(d, refs, plane_nets, per_part=2, total=12):
 _JOB = {}
 
 
+def _init_try(d, setup, res):
+    _JOB.update(d=d, setup=setup, res=res)
+
+
 def _try(move):
     from .board import Board
     from .router import Options, Router
@@ -322,12 +326,12 @@ def suggest(d, plane_nets, unrouted, hot, setup, jobs, log, res=0.05, budget=Non
     log("  footprints near the trouble: %s" % ", ".join(refs))
     moves = screen(d, refs, plane_nets, total=max(jobs, 8))
     log("  routing the board with each of %d moves (%.0fs so far)" % (len(moves), time.time() - t0))
-    _JOB.update(d=d, setup=setup, res=res)
     fps = {f["ref"]: f for f in d["footprints"]}
     found = []
     from .parallel import Timeout, pmap
     try:
-        for r in pmap(_try, moves, jobs, deadline=lambda: None if budget is None else t0 + budget):
+        for r in pmap(_try, moves, jobs, deadline=lambda: None if budget is None else t0 + budget,
+                      init=_init_try, initargs=(d, setup, res)):
             _, ref, rot, dx, dy = r["move"]
             r["text"] = describe(fps[ref], rot, dx, dy)
             log("    %-46s %2d unrouted  (%.0fs)" % (r["text"], r["unrouted"], r["secs"]))

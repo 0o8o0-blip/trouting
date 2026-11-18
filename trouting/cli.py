@@ -30,15 +30,39 @@ SETUPS = [(8.0, 2.5), (8.0, 1.5), (11.0, 2.5), (6.0, 2.5), (10.0, 1.5), (13.0, 2
           (7.0, 1.5), (15.0, 2.5), (9.0, 2.0), (12.0, 1.5), (5.0, 2.0), (8.0, 1.0)]
 
 
-# ---- KiCad: its Python (snap or system) and kicad-cli ----
+# ---- KiCad: its Python (snap, system or Windows install) and kicad-cli ----
+def windows_kicad():
+    """KiCad's python.exe on Windows: $KICAD_PYTHON, else the newest KiCad in Program Files."""
+    if os.environ.get("KICAD_PYTHON"):
+        return os.environ["KICAD_PYTHON"]
+    import glob
+    found = []
+    for base in {os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("ProgramW6432", ""),
+                 os.path.expandvars(r"%LOCALAPPDATA%\Programs")}:
+        if base:
+            found += glob.glob(os.path.join(base, "KiCad", "*", "bin", "python.exe"))
+
+    def version(p):                  # ...\KiCad\9.0\bin\python.exe -> (9, 0)
+        v = os.path.basename(os.path.dirname(os.path.dirname(p)))
+        return tuple(int(x) for x in re.findall(r"\d+", v))
+    return max(found, key=version) if found else None
+
+
 def kicad():
     """How to run a script under KiCad's Python, a work dir it can see, and kicad-cli."""
     try:
         subprocess.run([sys.executable, "-c", "import pcbnew"], check=True, capture_output=True)
         py = [sys.executable]
         work = tempfile.mkdtemp(prefix="trouting-")
-        cli = shutil.which("kicad-cli")
+        cli = shutil.which("kicad-cli") or shutil.which(os.path.join(os.path.dirname(sys.executable), "kicad-cli"))
     except subprocess.CalledProcessError:
+        if os.name == "nt":
+            exe = windows_kicad()
+            if not exe:
+                sys.exit("trouting: can't find KiCad's Python (pcbnew). Install KiCad, or set KICAD_PYTHON "
+                         "to its python.exe (in KiCad's bin folder)")
+            cli = os.path.join(os.path.dirname(exe), "kicad-cli.exe")
+            return [exe], tempfile.mkdtemp(prefix="trouting-"), cli if os.path.exists(cli) else None
         if not shutil.which("snap") or not os.path.exists("/snap/bin/kicad"):
             sys.exit("trouting: can't find KiCad's Python (pcbnew), neither installed nor as the snap")
         py = None                                   # through snap run
@@ -56,7 +80,9 @@ def run_kicad(py, args, timeout=600):
     else:
         q = " ".join("'%s'" % a.replace("'", "'\\''") for a in [KICAD_SIDE] + args)
         cmd = ["snap", "run", "--shell", "kicad", "-c", "python3 " + q]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       timeout=timeout, env=env)
     out = [l for l in (r.stdout + r.stderr).splitlines()
            if l.strip() and not re.match(r"(\d\d:\d\d:\d\d: Debug|swig/python detected)", l)]
     if r.returncode != 0:
@@ -72,7 +98,8 @@ def drc(cli, pcb, work, name):
     subprocess.run([cli, "pcb", "drc", "-o", rpt, pcb], capture_output=True)
     if not os.path.exists(rpt):
         return None, None
-    txt = open(rpt).read()
+    with open(rpt, encoding="utf-8", errors="replace") as fh:
+        txt = fh.read()
     counts = {}
     for m in re.finditer(r"^\[(\w+)\]", txt, re.M):
         counts[m.group(1)] = counts.get(m.group(1), 0) + 1
@@ -111,12 +138,23 @@ def _route(setup):
             "stitches": getattr(r, "stitches", 0)}
 
 
-def route_portfolio(board_json, tries, jobs, log, png_dir=None):
-    global _BOARD, _PNG_DIR
+def _init_route(board_json, png_dir):
+    """Each worker's board (on Windows a worker is a fresh Python and reads it itself)."""
+    global _BOARD, _PNG_DIR, _BOARD_FROM
     _PNG_DIR = png_dir
-    from .board import Board
+    if _BOARD is None or _BOARD_FROM != board_json:
+        from .board import Board
+        with open(board_json, encoding="utf-8") as fh:
+            _BOARD = Board(json.load(fh))
+        _BOARD_FROM = board_json
+
+
+_BOARD_FROM = None
+
+
+def route_portfolio(board_json, tries, jobs, log, png_dir=None):
     t = time.time()
-    _BOARD = Board(json.load(open(board_json)))
+    _init_route(board_json, png_dir)
     log("board read: %d x %d cells x %d layers, %d nets to join (%.1fs)"
         % (_BOARD.W, _BOARD.H, _BOARD.L, sum(1 for ts in _BOARD.terminals.values() if len(ts) > 1), time.time() - t))
     setups = SETUPS[:tries]
@@ -124,8 +162,9 @@ def route_portfolio(board_json, tries, jobs, log, png_dir=None):
     results = []
     deadline = [None]
     try:
-        # forked workers share the board read above
-        for res in pmap(_route, setups, min(jobs, len(setups)), deadline=lambda: deadline[0]):
+        # forked workers share the board read above; spawned ones read it again
+        for res in pmap(_route, setups, min(jobs, len(setups)), deadline=lambda: deadline[0],
+                        init=_init_route, initargs=(board_json, png_dir)):
             log("  setup via %4.1f, plane %.1f: %2d unrouted, %3d vias, %6.0f mm  (%d rounds, %.0fs)"
                 % (res["setup"] + (res["unrouted"], res["vias"], res["length"], res["rounds"], res["secs"])))
             results.append(res)
@@ -182,7 +221,8 @@ def main(argv=None):
 
         best = route_portfolio(j, a.tries, a.jobs, log, work if a.png else None)
         routes = os.path.join(work, "routes.json")
-        json.dump(best["out"], open(routes, "w"))
+        with open(routes, "w", encoding="utf-8") as fh:
+            json.dump(best["out"], fh)
         w_out = os.path.join(work, "out.kicad_pcb")
         log("best: via cost %.1f, plane cost %.1f" % best["setup"])
         for l in run_kicad(py, ["apply", w_src, routes, w_out] + rip):

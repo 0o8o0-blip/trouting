@@ -43,7 +43,7 @@ def _lib():
                            "prebuilt core for %s (%s)" % (platform_tag(), os.path.basename(pre)))
     lib = C.CDLL(so if os.path.exists(so) else pre)
     P = C.c_void_p
-    f, i, l = C.c_float, C.c_int, C.c_long
+    f, i, l = C.c_float, C.c_int, C.c_int64
     lib.g_new.restype = P
     lib.g_new.argtypes = [i, i, i, i, i, P, P, P, P, P]
     lib.g_free.argtypes = [P]

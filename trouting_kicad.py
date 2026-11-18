@@ -203,7 +203,7 @@ def dump(board, path, rip_up):
     # stable order, so a run repeats exactly
     d["pads"].sort(key=lambda e: (e["ref"], e["num"], e["at"]))
     d["footprints"].sort(key=lambda e: e["ref"])
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         json.dump(d, fh)
     print("dumped %d copper layers, %d footprints, %d pads, %d nets, %d tracks, %d vias%s"
           % (len(names), len(d["footprints"]), len(d["pads"]), len(d["nets"]),
@@ -224,13 +224,14 @@ def fills(board, path):
                             "outline": [pt(o.CPoint(k)) for k in range(o.PointCount())],
                             "holes": [[pt(h.CPoint(k)) for k in range(h.PointCount())]
                                       for h in (fp.Hole(i, j) for j in range(fp.HoleCount(i)))]})
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         json.dump(out, fh)
     print("%d filled pieces" % len(out))
 
 
 def apply(board, path, out, rip_up):
-    r = json.load(open(path))
+    with open(path, encoding="utf-8") as fh:
+        r = json.load(fh)
     apply_routes(board, r, rip_up)
     board.Save(out)
     print("applied %d tracks, %d vias -> %s" % (len(r["tracks"]), len(r["vias"]), out), flush=True)

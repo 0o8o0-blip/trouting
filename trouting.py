@@ -6,4 +6,5 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from trouting.cli import main
 
-main()
+if __name__ == "__main__":     # on Windows each worker imports this file again: it must not route
+    main()

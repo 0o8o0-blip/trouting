@@ -39,7 +39,7 @@ def main(argv=None):
         res["suggestions"] = [{"text": g["text"], "unrouted": g["unrouted"], "vias": g["vias"],
                                "ref": g["move"][1], "rot": g["move"][2], "dx": g["move"][3], "dy": g["move"][4]}
                               for g in sugg[:6]]
-    with open(a.result_json, "w") as fh:
+    with open(a.result_json, "w", encoding="utf-8") as fh:
         json.dump(res, fh)
     log("done (%.0fs)" % (time.time() - t0))
 

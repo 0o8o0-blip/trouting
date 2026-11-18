@@ -1,0 +1,96 @@
+# Trouting on Windows with the real KiCad: the plugin package and the command line.
+# The package is built on Linux (MinGW cross-compiles the core), then tested on
+# Windows the way a user gets it: unzipped, packages installed with KiCad's own pip.
+name: windows
+
+on:
+  push:
+    branches: [windows]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  KICAD_VERSION: "9.0.7"
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - run: python3 tools/make_pcm.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pcm
+          path: dist/*.zip
+
+  windows:
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      PYTHONIOENCODING: utf-8          # only for this test's own printing; the plugin sets it for its child
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pcm
+          path: dist
+
+      - name: Install KiCad
+        run: |
+          $exe = "$env:RUNNER_TEMP\kicad.exe"
+          curl.exe -sSL -o $exe "https://github.com/KiCad/kicad-source-mirror/releases/download/$env:KICAD_VERSION/kicad-$env:KICAD_VERSION-x86_64.exe"
+          Start-Process -Wait -FilePath $exe -ArgumentList "/S", "/allusers"
+          $bin = "C:\Program Files\KiCad\9.0\bin"
+          & "$bin\python.exe" -c "import sys, pcbnew; print(sys.version); print('pcbnew', pcbnew.Version())"
+          & "$bin\kicad-cli.exe" version
+
+      - name: Unpack the plugin as KiCad would
+        run: |
+          Expand-Archive (Get-ChildItem dist\*.zip).FullName "$env:RUNNER_TEMP\pcm"
+          Get-ChildItem -Recurse "$env:RUNNER_TEMP\pcm\plugins\trouting\prebuilt"
+
+      - name: First run - install numpy, scipy, shapely with KiCad's pip
+        run: |
+          $py = "C:\Program Files\KiCad\9.0\bin\python.exe"
+          $plug = "$env:RUNNER_TEMP\pcm\plugins"
+          & $py -c "import sys, subprocess; sys.path.insert(0, r'$plug'); import trouting_plugin as tp; py = tp.find_python(); print('router python:', py); print('packages before:', tp.deps_ok(py)); subprocess.check_call(tp.install_cmd(py)); print('packages after:', tp.deps_ok(py)); assert tp.deps_ok(py)"
+
+      - name: Plugin pipeline on the stuck demo - route, suggest, move, route again
+        run: |
+          $py = "C:\Program Files\KiCad\9.0\bin\python.exe"
+          $env:TROUTING_PLUGIN_DIR = "$env:RUNNER_TEMP\pcm\plugins"
+          $out = "$env:RUNNER_TEMP\stuck-out.kicad_pcb"
+          & $py test\t_plugin.py examples\demo\stuck.kicad_pcb $out | Tee-Object -FilePath "$env:RUNNER_TEMP\plugin.log"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $log = Get-Content -Raw "$env:RUNNER_TEMP\plugin.log"
+          if ($log -notmatch "made the move") { Write-Error "no suggested move was made"; exit 1 }
+          if ($log -notmatch "All connections routed") { Write-Error "not fully routed after the move"; exit 1 }
+          Copy-Item examples\demo\stuck.kicad_pro "$env:RUNNER_TEMP\stuck-out.kicad_pro"
+          & "C:\Program Files\KiCad\9.0\bin\kicad-cli.exe" pcb drc -o "$env:RUNNER_TEMP\drc.txt" $out
+          Get-Content "$env:RUNNER_TEMP\drc.txt" | Select-String "Found"
+          if (-not (Select-String -Quiet "Found 0 unconnected pads" "$env:RUNNER_TEMP\drc.txt")) { exit 1 }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Command line, with its own Python - finds KiCad in Program Files
+        run: |
+          python -m pip install -q -r requirements.txt
+          # a checkout has no prebuilt core: use the package's (else it needs a C compiler)
+          New-Item -ItemType Directory -Force trouting\prebuilt | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\pcm\plugins\trouting\prebuilt\*.dll" trouting\prebuilt\
+          python trouting.py examples\demo\demo.kicad_pcb -o "$env:RUNNER_TEMP\demo-out.kicad_pcb" --no-suggest | Tee-Object -FilePath "$env:RUNNER_TEMP\cli.log"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Select-String -Quiet "KiCad DRC: 0 unconnected pads" "$env:RUNNER_TEMP\cli.log")) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-results
+          path: |
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/drc.txt
+            ${{ runner.temp }}/*-out.kicad_pcb

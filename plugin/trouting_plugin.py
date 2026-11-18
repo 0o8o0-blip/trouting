@@ -29,18 +29,24 @@ if ROOT not in sys.path:
 import trouting_kicad  # noqa: E402  (needs ROOT on the path)
 
 
+# on Windows a python.exe started from KiCad would open a console window: none
+NO_WINDOW = {"creationflags": 0x08000000} if os.name == "nt" else {}       # CREATE_NO_WINDOW
+
+
 # ---- the Python that runs the router ----
 def find_python():
     """KiCad's own Python interpreter (inside KiCad, sys.executable may be KiCad itself)."""
     want = "%d.%d" % sys.version_info[:2]
     cands = [sys.executable, os.path.join(sys.prefix, "bin", "python3"), os.path.join(sys.prefix, "bin", "python"),
-             os.path.join(sys.prefix, "python.exe"), shutil.which("python3"), shutil.which("python")]
+             os.path.join(sys.prefix, "python.exe"),                          # Windows: KiCad's bin folder
+             os.path.join(os.path.dirname(sys.executable), "python.exe"),
+             shutil.which("python3"), shutil.which("python")]
     for c in cands:
         if not c or not os.path.isfile(c) or "python" not in os.path.basename(c).lower():
             continue
         try:
             v = subprocess.run([c, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
-                               capture_output=True, text=True, timeout=20).stdout.strip()
+                               capture_output=True, text=True, timeout=20, **NO_WINDOW).stdout.strip()
         except Exception:
             continue
         if v == want:              # the same version: packages installed for one work for the other
@@ -52,11 +58,12 @@ def child_env():
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(p for p in (DEPS, ROOT, env.get("PYTHONPATH", "")) if p)
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     return env
 
 
 def deps_ok(py):
-    r = subprocess.run([py, "-c", "import " + ", ".join(NEEDED)], env=child_env(), capture_output=True)
+    r = subprocess.run([py, "-c", "import " + ", ".join(NEEDED)], env=child_env(), capture_output=True, **NO_WINDOW)
     return r.returncode == 0
 
 
@@ -69,9 +76,10 @@ def install_cmd(py):
 class Child:
     def __init__(self, cmd):
         kw = {"start_new_session": True} if os.name == "posix" else \
-             {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+             {"creationflags": NO_WINDOW["creationflags"] | subprocess.CREATE_NEW_PROCESS_GROUP}
         self.p = subprocess.Popen(cmd, cwd=ROOT, env=child_env(), stdout=subprocess.PIPE,
-                                  stderr=subprocess.STDOUT, text=True, bufsize=1, **kw)
+                                  stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                                  bufsize=1, **kw)
         self.q = queue.Queue()
         self.lines = []
         threading.Thread(target=self._read, daemon=True).start()
@@ -94,7 +102,8 @@ class Child:
         try:
             if os.name == "posix":
                 os.killpg(self.p.pid, signal.SIGTERM)     # the router's worker processes too
-            else:
+            else:                                         # the same on Windows: the whole tree
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.p.pid)], capture_output=True, **NO_WINDOW)
                 self.p.kill()
         except Exception:
             pass
@@ -127,7 +136,8 @@ def route_board(board, py, keep_tracks=False, suggest=True, tries=12, poll=lambd
         rc = ch.wait(poll)
         if rc != 0 or not os.path.exists(rj):
             return None, ch.lines
-        res = json.load(open(rj))
+        with open(rj, encoding="utf-8") as fh:
+            res = json.load(fh)
         new = trouting_kicad.apply_routes(board, res["out"], rip_up=not keep_tracks)
         return res, new
     finally:
