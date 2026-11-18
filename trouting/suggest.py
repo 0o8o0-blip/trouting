@@ -17,11 +17,10 @@ the ones that leave fewer connections unrouted are reported.
 """
 import copy
 import math
-import multiprocessing as mp
 import time
 
 import numpy as np
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 from .board import poly_of
@@ -88,7 +87,8 @@ def moved(d, ref, rot=0, dx=0.0, dy=0.0):
 def describe(fp, rot, dx, dy):
     if rot:
         way = {90: "90° counter-clockwise", 180: "180°", 270: "90° clockwise"}[rot]
-        to = (fp["rot"] + rot + 180) % 360 - 180            # as KiCad shows it, -180..180
+        to = (fp["rot"] + rot + 180) % 360 - 180            # as KiCad shows it, -180 shown as 180
+        to = 180 if to == -180 else to
         return "rotate %s %s (to %g°)" % (fp["ref"], way, to)
     dist = math.hypot(dx, dy)
     names = {(1, 0): "right", (-1, 0): "left", (0, 1): "down", (0, -1): "up",
@@ -117,17 +117,64 @@ class Space:
             self.outline = self.outline.difference(holes)
         self.side = {f["ref"]: f["side"] for f in d["footprints"]}
         self.area = {f["ref"]: footprint_area(f) for f in d["footprints"]}
+        # copper, per layer and footprint: a part on the back still meets a through-hole
+        # part's pads there, which the courtyards (one side each) don't show
+        clr = max([r["clearance"] for r in d["nets"].values()] + [d["rules"].get("min_clearance") or 0.2])
+        self.half = clr / 2                      # each side keeps half: together, the clearance
+        per = {}
+        for p in d["pads"]:
+            for l, rings in p["shapes"].items():
+                per.setdefault((p["ref"], l), []).append(poly_of(rings))
+        for h in d["holes"]:
+            if h.get("ref"):
+                for l in d["layers"]:
+                    per.setdefault((h["ref"], l), []).append(Point(h["at"]).buffer(h["r"], 16))
+        # copper that stays put: the tracks and vias kept (locked), drawn copper not in a footprint
+        fixed = {}
+        for t in d["tracks"]:
+            fixed.setdefault(t["layer"], []).append(LineString([t["a"], t["b"]]).buffer(t["w"] / 2, 8))
+        for v in d["vias"]:
+            for l in d["layers"]:
+                fixed.setdefault(l, []).append(Point(v["at"]).buffer(v["d"] / 2, 16))
+        for c in d["copper_shapes"]:
+            if not c.get("ref"):
+                fixed.setdefault(c["layer"], []).append(poly_of(c["polys"]))
+        for l, gs in fixed.items():
+            per.setdefault((None, l), []).extend(gs)
+        # a part with kept copper on its pads is held where it is (a locked stub, vias in its pad)
+        self.anchored = set()
+        for p in d["pads"]:
+            for l, rings in p["shapes"].items():
+                if l in fixed and poly_of(rings).intersects(unary_union(fixed[l])):
+                    self.anchored.add(p["ref"])
+        self.copper = {k: unary_union(v).buffer(self.half, 4) for k, v in per.items()}
+        self.layers = d["layers"]
+        self.at = {f["ref"]: tuple(f["at"]) for f in d["footprints"]}
 
     def others(self, ref):
         side = self.side[ref]
-        return unary_union([g for r, g in self.area.items() if r != ref and self.side[r] == side])
+        court = unary_union([g for r, g in self.area.items() if r != ref and self.side[r] == side])
+        cu = {l: unary_union([g for (r, l2), g in self.copper.items() if r != ref and l2 == l]) for l in self.layers}
+        return court, cu
 
-    def fits(self, ref, g_new, others=None):
+    def fits(self, ref, rot, dx, dy, others=None):
+        """May footprint ref be turned by rot and shifted by (dx, dy)?"""
+        from shapely import affinity
+
+        def move(g):     # shapely turns counter-clockwise with y up: on the board (y down), clockwise
+            return affinity.translate(affinity.rotate(g, -rot, origin=self.at[ref]) if rot else g, dx, dy)
+        court, cu = self.others(ref) if others is None else others
         g_old = self.area[ref]
-        others = self.others(ref) if others is None else others
-        # no more overlap with the others than before, no further off the board
-        if g_new.intersection(others).area > g_old.intersection(others).area + 1e-3:
+        g_new = move(g_old)
+        # no more overlap with the others than before: courtyards on its side, copper on every layer
+        if g_new.intersection(court).area > g_old.intersection(court).area + 1e-3:
             return False
+        for l in self.layers:
+            mine = self.copper.get((ref, l))
+            if mine is not None and not cu[l].is_empty and \
+                    move(mine).intersection(cu[l]).area > mine.intersection(cu[l]).area + 1e-4:
+                return False
+        # no further off the board
         out_old = g_old.difference(self.outline).area
         out_new = g_new.difference(self.outline).area
         if out_old < 1e-3:
@@ -198,7 +245,7 @@ def candidates(d, unrouted, hot, max_parts=8, reach=3.0):
     space = Space(d)
     score = {}
     for f in d["footprints"]:
-        if f["locked"]:
+        if f["locked"] or f["ref"] in space.anchored:
             continue
         g = space.area[f["ref"]]
         s = 3.0 * sum(1 for p in pads if p.split(".")[0] == f["ref"])
@@ -212,23 +259,17 @@ def candidates(d, unrouted, hot, max_parts=8, reach=3.0):
 
 
 def moves_for(d, ref, space):
-    fp = next(f for f in d["footprints"] if f["ref"] == ref)
-    g = space.area[ref]
     others = space.others(ref)
-    f_at = fp["at"]
     out = []
-    from shapely import affinity
     for rot in ROTATIONS:
-        # shapely rotates counter-clockwise in y-up; on the board (y down) that is clockwise
-        g2 = affinity.rotate(g, -rot, origin=tuple(f_at))
-        if space.fits(ref, g2, others):
+        if space.fits(ref, rot, 0.0, 0.0, others):
             out.append((rot, 0.0, 0.0))
     for step in STEPS:
         for ux, uy in DIRS:
             k = step / math.hypot(ux, uy) if ux and uy else step
-            dx, dy = ux * k, uy * k
-            if space.fits(ref, affinity.translate(g, dx, dy), others):
-                out.append((0, round(dx, 3), round(dy, 3)))
+            dx, dy = round(ux * k, 3), round(uy * k, 3)
+            if space.fits(ref, 0, dx, dy, others):
+                out.append((0, dx, dy))
     return out
 
 
@@ -284,20 +325,15 @@ def suggest(d, plane_nets, unrouted, hot, setup, jobs, log, res=0.05, budget=Non
     _JOB.update(d=d, setup=setup, res=res)
     fps = {f["ref"]: f for f in d["footprints"]}
     found = []
-    ctx = mp.get_context("fork")
-    with ctx.Pool(min(jobs, len(moves))) as pool:
-        it = pool.imap_unordered(_try, moves)
-        for _ in moves:
-            try:
-                r = it.next(timeout=None if budget is None else max(1.0, budget - (time.time() - t0)))
-            except mp.TimeoutError:
-                log("  (out of time: stopped the moves still routing)")
-                pool.terminate()
-                break
+    from .parallel import Timeout, pmap
+    try:
+        for r in pmap(_try, moves, jobs, deadline=lambda: None if budget is None else t0 + budget):
             _, ref, rot, dx, dy = r["move"]
             r["text"] = describe(fps[ref], rot, dx, dy)
             log("    %-46s %2d unrouted  (%.0fs)" % (r["text"], r["unrouted"], r["secs"]))
             found.append(r)
+    except Timeout:
+        log("  (out of time: stopped the moves still routing)")
     before = len(unrouted)
     good = [r for r in found if r["unrouted"] < before]
 

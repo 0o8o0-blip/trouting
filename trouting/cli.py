@@ -14,7 +14,6 @@ violation that wasn't on the board before is listed.
 import argparse
 import json
 import math
-import multiprocessing as mp
 import os
 import re
 import shutil
@@ -121,26 +120,21 @@ def route_portfolio(board_json, tries, jobs, log, png_dir=None):
     log("board read: %d x %d cells x %d layers, %d nets to join (%.1fs)"
         % (_BOARD.W, _BOARD.H, _BOARD.L, sum(1 for ts in _BOARD.terminals.values() if len(ts) > 1), time.time() - t))
     setups = SETUPS[:tries]
-    ctx = mp.get_context("fork")                 # the workers share the board read above
+    from .parallel import Timeout, pmap
     results = []
-    deadline = None
-    with ctx.Pool(min(jobs, len(setups))) as pool:
-        it = pool.imap_unordered(_route, setups)
-        while len(results) < len(setups):
-            try:
-                res = it.next(timeout=None if deadline is None else max(0.1, deadline - time.time()))
-            except mp.TimeoutError:
-                log("  (stopped the %d setups still running: a full route is in, and they had half as long again)"
-                    % (len(setups) - len(results)))
-                pool.terminate()
-                break
+    deadline = [None]
+    try:
+        # forked workers share the board read above
+        for res in pmap(_route, setups, min(jobs, len(setups)), deadline=lambda: deadline[0]):
             log("  setup via %4.1f, plane %.1f: %2d unrouted, %3d vias, %6.0f mm  (%d rounds, %.0fs)"
                 % (res["setup"] + (res["unrouted"], res["vias"], res["length"], res["rounds"], res["secs"])))
             results.append(res)
             # one setup routed everything: the others get half as long again to do it with
             # fewer vias, then the best so far is taken
-            if res["unrouted"] == 0 and deadline is None:
-                deadline = time.time() + max(20.0, 0.5 * (time.time() - t))
+            if res["unrouted"] == 0 and deadline[0] is None:
+                deadline[0] = time.time() + max(20.0, 0.5 * (time.time() - t))
+    except Timeout as e:
+        log("  (stopped the %d setups still running: a full route is in, and they had half as long again)" % e.left)
     results.sort(key=lambda r: (r["unrouted"], r["vias"], r["length"]))
     return results[0]
 

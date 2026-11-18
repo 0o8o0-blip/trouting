@@ -2,13 +2,15 @@
 # route every board in test/boards with the trouting command and tabulate the results
 #   test/bench.sh            all boards
 #   test/bench.sh mine other     just these (test/boards/mine.kicad_pcb, ...)
+#   JOBS=N test/bench.sh         use N cores (default: half of them, at low priority)
 cd "$(dirname "$0")"
 out=out/bench; mkdir -p $out
 boards=${@:-$(ls boards/*.kicad_pcb | xargs -n1 basename | sed 's/.kicad_pcb//')}
 sum=$out/summary.txt; : > $sum
+jobs=${JOBS:-$(( ($(nproc) + 1) / 2 ))}
 for b in $boards; do
   t=$(date +%s)
-  timeout 1200 python3 ../trouting.py boards/$b.kicad_pcb -o $out/$b.kicad_pcb > $out/$b.log 2>&1
+  timeout 1200 nice -n 19 python3 ../trouting.py boards/$b.kicad_pcb --jobs $jobs -o $out/$b.kicad_pcb > $out/$b.log 2>&1
   rc=$?
   for x in kicad_pro kicad_dru; do [ -f boards/$b.$x ] && cp boards/$b.$x $out/$b.$x; done   # rules, so KiCad opens the result right
   secs=$(( $(date +%s) - t ))

@@ -63,6 +63,7 @@ but not routed):
 
 ```sh
 ./trouting.py examples/demo/demo.kicad_pcb -o demo-routed.kicad_pcb
+./trouting.py examples/demo/stuck.kicad_pcb -o stuck-routed.kicad_pcb   # placed too tight: shows the suggestions
 ```
 
 Close the board in KiCad first, or reload it after. Keep the `.kicad_pro` (and
@@ -93,19 +94,24 @@ KiCad DRC: 0 unconnected pads (was 0)
 
 Then Trouting looks for a part to move or rotate. It takes the parts near the
 connections it couldn't make and tries turning them and shifting them by 0.5
-to 2 mm, keeping them clear of the other parts and as far inside the board as
-they were. It ranks the moves by how much shorter and less tangled the
-ratsnest gets, then routes the whole board with each of the best ones. Only
-moves that leave fewer connections unrouted are listed:
+to 2 mm. A move must keep the part's courtyard clear of the other parts, its
+pads clear of other copper, and the part as far inside the board as it was.
+Trouting ranks the moves by how much shorter and less tangled the ratsnest
+gets, then routes the whole board with each of the best ones. Only moves that
+leave fewer connections unrouted are listed. On `examples/demo/stuck.kicad_pcb`
+(the demo with U1 turned and C5 moved up):
 
 ```
 not routed (3):
-  +3.3VP                   U2.13
-  Net-(R1-Pad2)            U2.14
-  Net-(R6-Pad2)            U2.20
+  ADC1                     U1.10
+  SDA                      U1.13
+  TX                       U1.11
+  crowded at: (123.50, 112.30)
 to make it route, move or rotate a part (each checked by routing the board with it):
-  move U2 2.0 mm right and down (to 65.41, 96.91)    routes fully
-  rotate U2 90° counter-clockwise (to -90°)          routes fully
+  move C5 0.5 mm right and down (to 124.15, 114.15)  routes fully
+  move C5 2.0 mm down (to 123.80, 115.80)            routes fully
+  rotate U1 90° clockwise (to 0°)                    2 left unrouted
+  move U1 1.0 mm down (to 120.00, 114.00)            2 left unrouted
 ```
 
 This takes about as long again as the routing. `--no-suggest` skips it.
@@ -142,6 +148,8 @@ Bug reports with a board attached are the most useful thing you can send.
 | `trouting/core.c` | A* search and the occupancy bookkeeping, in C. |
 | `trouting/router.py` | The negotiated-congestion rounds, GND stitching, the pour model, thermal checks, and rip-up and repair. |
 | `trouting/cli.py` | The command: runs the setups in parallel, applies the best, runs DRC before and after. |
+| `trouting/suggest.py` | Placement suggestions: moves near the trouble, screened by the ratsnest, checked by routing. |
+| `trouting/parallel.py` | Forked workers and pipes (KiCad's snap doesn't allow the semaphores `multiprocessing` needs). |
 
 ## Developing
 

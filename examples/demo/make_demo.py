@@ -8,6 +8,10 @@ It writes demo.kicad_pcb and demo.kicad_pro next to itself. The design is made
 up for this demo: a 32-pin QFN microcontroller, USB-C with a 3.3 V regulator,
 a crystal, two LEDs, a button, an I/O header and a debug header, with a GND
 pour on the back.
+
+With --stuck it writes stuck.kicad_pcb instead: the same board with U1 turned
+90° and C5 moved 2 mm up. Trouting can't route all of that one as placed, and
+suggests a move that fixes it.
 """
 import json
 import os
@@ -139,12 +143,20 @@ zone.SetThermalReliefGap(mm(0.4))
 zone.SetThermalReliefSpokeWidth(mm(0.4))
 board.Add(zone)
 
-out = os.path.join(HERE, "demo.kicad_pcb")
+# --stuck: the same board with U1 turned and C5 moved up, which Trouting can't route
+# as placed; for trying its placement suggestions
+NAME = "demo"
+if "--stuck" in sys.argv[1:]:
+    NAME = "stuck"
+    u1 = board.FindFootprintByReference("U1")
+    u1.SetOrientationDegrees(u1.GetOrientationDegrees() + 90)
+    board.FindFootprintByReference("C5").Move(pcbnew.VECTOR2I(0, mm(-2)))
+out = os.path.join(HERE, NAME + ".kicad_pcb")
 board.Save(out)
 
 # net classes live in the project file: power nets 0.4 mm
 pro = {
-    "meta": {"filename": "demo.kicad_pro", "version": 3},
+    "meta": {"filename": NAME + ".kicad_pro", "version": 3},
     "net_settings": {
         "meta": {"version": 4},
         "classes": [
@@ -160,7 +172,7 @@ pro = {
         "netclass_patterns": [{"netclass": "Power", "pattern": "VBUS"}, {"netclass": "Power", "pattern": "+3V3"}],
     },
 }
-json.dump(pro, open(os.path.join(HERE, "demo.kicad_pro"), "w"), indent=2)
+json.dump(pro, open(os.path.join(HERE, NAME + ".kicad_pro"), "w"), indent=2)
 print("wrote", out)
 sys.stdout.flush()
 os._exit(0)

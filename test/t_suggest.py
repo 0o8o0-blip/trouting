@@ -8,7 +8,6 @@
 BOARD is test/boards/<name>.json or a path to a dumped .json.
 """
 import json
-import multiprocessing as mp
 import os
 import sys
 import time
@@ -45,10 +44,10 @@ def route(d):
 
 
 def _scan_one(job):
-    ref, rot = job
+    ref, rot, dx, dy = job
     t = time.time()
-    out, _, _ = route(moved(D, ref, rot))
-    return ref, rot, len(out["unrouted"]), time.time() - t
+    out, _, _ = route(moved(D, ref, rot, dx, dy))
+    return job, len(out["unrouted"]), time.time() - t
 
 
 def main():
@@ -56,18 +55,25 @@ def main():
     name, mode = sys.argv[1], sys.argv[2]
     D = load(name)
     if mode == "scan":
-        refs = sys.argv[3:] or [f["ref"] for f in D["footprints"] if not f["locked"]
+        refs = [a for a in sys.argv[3:] if not a.startswith("--")] or [f["ref"] for f in D["footprints"] if not f["locked"]
                                 and sum(1 for p in D["pads"] if p["ref"] == f["ref"] and p["net"]) >= 4]
-        from shapely import affinity
         from trouting.suggest import Space
         sp = Space(D)
-        at = {f["ref"]: f["at"] for f in D["footprints"]}
-        jobs = [(r, a) for r in refs for a in (90, 180, 270)
-                if sp.fits(r, affinity.rotate(sp.area[r], -a, origin=tuple(at[r])))]
+        # turns, and (with --shifts) 2 mm shifts: placements a designer might make, that fit
+        from trouting.suggest import moves_for
+        jobs = []
+        for r in refs:
+            if r in sp.anchored:
+                continue
+            for rot, dx, dy in moves_for(D, r, sp):
+                if rot or ("--shifts" in sys.argv and abs(dx) + abs(dy) >= 2.0):
+                    jobs.append((r, rot, dx, dy))
         print("%d variants" % len(jobs), flush=True)
-        with mp.get_context("fork").Pool(os.cpu_count()) as pool:
-            for ref, rot, u, s in pool.imap_unordered(_scan_one, jobs):
-                print("  %-6s rot %3d: %2d unrouted  (%.0fs)" % (ref, rot, u, s), flush=True)
+        from trouting.parallel import pmap
+        for (ref, rot, dx, dy), u, s in pmap(_scan_one, jobs, os.cpu_count()):
+            if u:
+                print("  %s:%d:%g:%g  %2d unrouted  (%.0fs)" % (ref, rot, dx, dy, u, s), flush=True)
+        print("done", flush=True)
         return
     d = D
     for spec in sys.argv[3:]:
