@@ -34,7 +34,7 @@ a ground pour**, QFNs, an ESP32 module, fine-pitch connectors.
   reads and writes the `.kicad_pcb` through KiCad's own Python module.
 
 Status: young but working. It routes all ten real boards in its test set to zero
-unconnected pads (see Results). It is developed on Linux with KiCad 9.
+unconnected pads (see Results). It runs on Linux and Windows with KiCad 9.
 
 ## In KiCad: the plugin
 
@@ -43,27 +43,41 @@ board, and Ctrl+Z takes the routes out again. When the board can't be routed
 as placed, the result window lists the suggested moves, and "Make this move
 and route again" does just that.
 
-To install it, download `trouting-0.1.0-pcm.zip` from the
+To install it, download the `trouting-…-pcm.zip` from the
 [latest release](https://github.com/TommyHolt/trouting/releases/latest). In
 KiCad, open **Plugin and Content Manager > Install from File**, pick the zip,
-then restart the PCB editor. To build the zip from a checkout instead, run
-`python3 tools/make_pcm.py`; it writes the zip to `dist/`. (From a checkout, `tools/install_plugin.sh` links the
-plugin in instead, for development.)
+then restart the PCB editor. The same zip works on Linux and Windows.
+
+From a checkout, `python3 tools/make_pcm.py` builds the zip into `dist/`, and
+on Linux `tools/install_plugin.sh` links the plugin into KiCad instead, for
+development.
 
 The first time you click it, it asks to install numpy, scipy and shapely into
 its own folder with KiCad's pip: a 55 MB download. The router runs in a
 process of its own, so the editor stays responsive and you can cancel.
 
-The plugin is Linux only for now. It is tested with the KiCad 9 snap.
+It works on Linux and on 64-bit Windows, with KiCad 9. On Linux it is tested
+with the KiCad 9 snap. On Windows, every change is tested on GitHub Actions
+with the KiCad 9 installer: the package install and the whole routing run,
+up to a clean DRC. Not macOS yet.
+
+It routes 12 setups at once and keeps the best, so it is quicker the more cores
+you have: the stuck demo below, suggestions included, takes about 7 minutes on
+12 cores and over 20 on 4.
 
 ## From the command line
 
 You need:
 
-- **KiCad 9.** Tested with the snap (`sudo snap install kicad`). A normal
-  install should also work if your system Python can `import pcbnew`.
+- **KiCad 9.** On Linux, tested with the snap (`sudo snap install kicad`); a
+  normal install should also work if your system Python can `import pcbnew`.
+  On Windows, the normal installer: Trouting finds KiCad in Program Files (or
+  set `KICAD_PYTHON` to the `python.exe` in KiCad's `bin` folder).
 - **Python 3.10 or newer** with numpy, scipy, shapely and Pillow.
-- **gcc.** The search core is a small C file, compiled the first time it runs.
+- **A C compiler**, for the search core, a small C file compiled the first time
+  it runs. On Linux, gcc. On Windows, either gcc from MinGW-w64, or no compiler:
+  copy `plugins/trouting/prebuilt/core-…-win32-amd64.dll` out of the release
+  zip into `trouting/prebuilt/`.
 
 ```sh
 git clone https://github.com/TommyHolt/trouting.git
@@ -79,6 +93,8 @@ Then:
 ./trouting.py board.kicad_pcb --keep-tracks        # keep the tracks already there, route the rest
 ./trouting.py board.kicad_pcb --png routed.png     # also draw the result: front red, back blue, vias white
 ```
+
+On Windows, run it as `python trouting.py …`.
 
 To try it on the demo board (a made-up USB-C microcontroller board, placed
 but not routed):
@@ -171,7 +187,7 @@ Bug reports with a board attached are the most useful thing you can send.
 | `trouting/router.py` | The negotiated-congestion rounds, GND stitching, the pour model, thermal checks, and rip-up and repair. |
 | `trouting/cli.py` | The command: runs the setups in parallel, applies the best, runs DRC before and after. |
 | `trouting/suggest.py` | Placement suggestions: moves near the trouble, screened by the ratsnest, checked by routing. |
-| `trouting/parallel.py` | Forked workers and pipes (KiCad's snap doesn't allow the semaphores `multiprocessing` needs). |
+| `trouting/parallel.py` | The worker processes: fork and pipes on Linux (KiCad's snap doesn't allow the semaphores `multiprocessing` needs), a spawn pool on Windows. |
 | `trouting/job.py`, `plugin/` | The KiCad plugin: the dialogs, and the router run as a job of its own. |
 
 ## Developing
