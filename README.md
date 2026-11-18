@@ -43,14 +43,11 @@ board, and Ctrl+Z takes the routes out again. When the board can't be routed
 as placed, the result window lists the suggested moves, and "Make this move
 and route again" does just that.
 
-To install it, build the package and install the zip in KiCad:
-
-```sh
-python3 tools/make_pcm.py            # writes dist/trouting-0.1.0-pcm.zip
-```
-
-KiCad: **Plugin and Content Manager > Install from File**, pick the zip, then
-restart the PCB editor. (From a checkout, `tools/install_plugin.sh` links the
+To install it, download `trouting-0.1.0-pcm.zip` from the
+[latest release](https://github.com/TommyHolt/trouting/releases/latest). In
+KiCad, open **Plugin and Content Manager > Install from File**, pick the zip,
+then restart the PCB editor. To build the zip from a checkout instead, run
+`python3 tools/make_pcm.py`; it writes the zip to `dist/`. (From a checkout, `tools/install_plugin.sh` links the
 plugin in instead, for development.)
 
 The first time you click it, it asks to install numpy, scipy and shapely into
