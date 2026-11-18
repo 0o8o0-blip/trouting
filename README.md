@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/trout.png" width="128" alt="Trouting's trout: its red side stripe is a track, its eye a via"></p>
+
 # Trouting: an autorouter for KiCad
 
 Trouting (short for *Tommy's routing*) routes the tracks of a KiCad PCB for you. Give it a placed board with

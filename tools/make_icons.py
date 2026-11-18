@@ -1,6 +1,6 @@
 """Draw Trouting's icon, a trout, at the sizes KiCad uses.
 
-    python3 tools/make_icons.py          # writes plugin/icon.png (24 px) and plugin/icon-64.png
+    python3 tools/make_icons.py          # plugin/icon.png (24 px), plugin/icon-64.png, docs/trout.png (256 px, the README's)
 
 The trout's red side stripe is a track with a 45° bend, and its eye is a via.
 Needs pycairo. Drawn on a 64-unit square and scaled, so every size matches.
@@ -111,3 +111,5 @@ if __name__ == "__main__":
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "plugin")
     draw(24, os.path.join(out, "icon.png"))
     draw(64, os.path.join(out, "icon-64.png"))
+    if len(sys.argv) == 1:
+        draw(256, os.path.join(ROOT, "docs", "trout.png"))
