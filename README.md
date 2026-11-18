@@ -34,7 +34,30 @@ a ground pour**, QFNs, an ESP32 module, fine-pitch connectors.
 Status: young but working. It routes all ten real boards in its test set to zero
 unconnected pads (see Results). It is developed on Linux with KiCad 9.
 
-## Install
+## In KiCad: the plugin
+
+Trouting can run from KiCad's PCB editor: a toolbar button routes the open
+board, and Ctrl+Z takes the routes out again. When the board can't be routed
+as placed, the result window lists the suggested moves, and "Make this move
+and route again" does just that.
+
+To install it, build the package and install the zip in KiCad:
+
+```sh
+python3 tools/make_pcm.py            # writes dist/trouting-0.1.0-pcm.zip
+```
+
+KiCad: **Plugin and Content Manager > Install from File**, pick the zip, then
+restart the PCB editor. (From a checkout, `tools/install_plugin.sh` links the
+plugin in instead, for development.)
+
+The first time you click it, it asks to install numpy, scipy and shapely into
+its own folder with KiCad's pip: a 55 MB download. The router runs in a
+process of its own, so the editor stays responsive and you can cancel.
+
+The plugin is Linux only for now. It is tested with the KiCad 9 snap.
+
+## From the command line
 
 You need:
 
@@ -49,7 +72,7 @@ cd trouting
 pip install -r requirements.txt
 ```
 
-## Use
+Then:
 
 ```sh
 ./trouting.py board.kicad_pcb                      # route in place, keeps board.kicad_pcb.trouting-bak
@@ -150,6 +173,7 @@ Bug reports with a board attached are the most useful thing you can send.
 | `trouting/cli.py` | The command: runs the setups in parallel, applies the best, runs DRC before and after. |
 | `trouting/suggest.py` | Placement suggestions: moves near the trouble, screened by the ratsnest, checked by routing. |
 | `trouting/parallel.py` | Forked workers and pipes (KiCad's snap doesn't allow the semaphores `multiprocessing` needs). |
+| `trouting/job.py`, `plugin/` | The KiCad plugin: the dialogs, and the router run as a job of its own. |
 
 ## Developing
 

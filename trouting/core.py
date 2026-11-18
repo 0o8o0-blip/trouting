@@ -2,7 +2,10 @@
 import ctypes as C
 import hashlib
 import os
+import platform
+import shutil
 import subprocess
+import sys
 
 import numpy as np
 
@@ -10,13 +13,35 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "core.c")
 
 
+EXT = ".dll" if sys.platform == "win32" else ".dylib" if sys.platform == "darwin" else ".so"
+
+
+def platform_tag():
+    return "%s-%s" % (sys.platform, platform.machine().lower())
+
+
+def _build(so):
+    """Compile core.c to `so` with the first C compiler found; False if there is none."""
+    for cc in ("gcc", "cc", "clang"):
+        exe = shutil.which(cc)
+        if not exe:
+            continue
+        os.makedirs(os.path.dirname(so), exist_ok=True)
+        subprocess.check_call([exe, "-O3", "-march=native", "-shared", "-fPIC", "-Wall", "-o", so, SRC, "-lm"])
+        return True
+    return False
+
+
 def _lib():
     h = hashlib.sha1(open(SRC, "rb").read()).hexdigest()[:12]
-    so = os.path.join(HERE, "_build", "core-%s.so" % h)
-    if not os.path.exists(so):
-        os.makedirs(os.path.dirname(so), exist_ok=True)
-        subprocess.check_call(["gcc", "-O3", "-march=native", "-shared", "-fPIC", "-Wall", "-o", so, SRC, "-lm"])
-    lib = C.CDLL(so)
+    so = os.path.join(HERE, "_build", "core-%s%s" % (h, EXT))
+    # no compiler (KiCad's own Python, inside the snap, on Windows): a build that
+    # came with Trouting for this platform and this core.c
+    pre = os.path.join(HERE, "prebuilt", "core-%s-%s%s" % (h, platform_tag(), EXT))
+    if not os.path.exists(so) and not os.path.exists(pre) and not _build(so):
+        raise RuntimeError("trouting: no C compiler (gcc, cc or clang) to build its core with, and no "
+                           "prebuilt core for %s (%s)" % (platform_tag(), os.path.basename(pre)))
+    lib = C.CDLL(so if os.path.exists(so) else pre)
     P = C.c_void_p
     f, i, l = C.c_float, C.c_int, C.c_long
     lib.g_new.restype = P
