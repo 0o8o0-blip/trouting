@@ -14,9 +14,16 @@ import os
 import platform
 import re
 import shutil
+import subprocess
 import sys
 import urllib.request
 import zipfile
+
+try:
+    import ssl  # noqa: F401  (urllib needs it for https)
+    SSL_ERROR = None
+except Exception as e:       # KiCad's AppImage on some systems (Ubuntu 26.04): its ssl doesn't load
+    SSL_ERROR = "%s: %s" % (type(e).__name__, e)
 
 PYPI = "https://pypi.org/pypi/%s/json"
 LEGACY = {"manylinux1": (2, 5), "manylinux2010": (2, 12), "manylinux2014": (2, 17)}
@@ -91,10 +98,22 @@ def fits(filename):
     return False
 
 
+def fetch(url, timeout):
+    """The bytes at url: with urllib, or (no ssl in this Python) with curl or wget.
+    What comes back is checked by the caller (PyPI's SHA-256 for a wheel)."""
+    if SSL_ERROR is None:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.read()
+    for cmd in (["curl", "-fsSL", "--max-time", str(timeout), url], ["wget", "-q", "-T", str(timeout), "-O", "-", url]):
+        if shutil.which(cmd[0]):
+            return subprocess.run(cmd, check=True, capture_output=True).stdout
+    raise SystemExit("trouting_wheels: this Python can't use https (%s), and there is no curl or wget "
+                     "to download with" % SSL_ERROR)
+
+
 def meta(name, ver=None):
     url = PYPI % (name if ver is None else "%s/%s" % (name, ver))
-    with urllib.request.urlopen(url, timeout=60) as r:
-        return json.load(r)
+    return json.loads(fetch(url, 60))
 
 
 def pick(name, spec=""):
@@ -121,8 +140,7 @@ def numpy_spec(name, ver):
 
 def unpack(f, target):
     print("  %s: downloading %.0f MB" % (f["filename"], f["size"] / 1e6), flush=True)
-    with urllib.request.urlopen(f["url"], timeout=300) as r:
-        data = r.read()
+    data = fetch(f["url"], 300)
     if hashlib.sha256(data).hexdigest() != f["digests"]["sha256"]:
         raise SystemExit("trouting_wheels: %s doesn't match PyPI's SHA-256" % f["filename"])
     path = os.path.join(target, f["filename"])
@@ -145,6 +163,8 @@ def main(target, names):
     if not sys.platform.startswith("linux"):
         raise SystemExit("trouting_wheels: only for Linux (elsewhere KiCad's Python has pip)")
     os.makedirs(target, exist_ok=True)
+    if SSL_ERROR:
+        print("(no https in this Python: %s; downloading with curl/wget)" % SSL_ERROR, flush=True)
     chosen = {}
     spec = ""
     for name in names:                       # numpy last: it has to suit the others
