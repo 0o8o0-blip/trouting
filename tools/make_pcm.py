@@ -126,7 +126,7 @@ def main():
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("metadata.json", json.dumps(meta, indent=2))
         z.write(os.path.join(ROOT, "plugin", "icon-64.png"), "resources/icon.png")
-        for f in ("__init__.py", "trouting_plugin.py", "icon.png"):
+        for f in ("__init__.py", "trouting_plugin.py", "trouting_wheels.py", "icon.png"):
             z.write(os.path.join(ROOT, "plugin", f), "plugins/" + f)
         z.write(os.path.join(ROOT, "trouting_kicad.py"), "plugins/trouting_kicad.py")
         for f in sorted(os.listdir(os.path.join(ROOT, "trouting"))):

@@ -41,6 +41,11 @@ def find_python():
     cands = [sys.executable, os.path.join(sys.prefix, "bin", "python3"), os.path.join(sys.prefix, "bin", "python"),
              os.path.join(sys.prefix, "python.exe"),                          # Windows: KiCad's bin folder
              os.path.join(os.path.dirname(sys.executable), "python.exe"),
+             # KiCad's AppImage: its Python is bin/python3.X at the mount ($APPDIR), the
+             # prefix being <mount>/shared
+             os.path.join(os.environ.get("APPDIR", ""), "bin", "python" + want) if os.environ.get("APPDIR") else None,
+             os.path.join(os.path.dirname(sys.prefix), "bin", "python" + want),
+             os.path.join(sys.prefix, "bin", "python" + want),
              shutil.which("python3"), shutil.which("python")]
     for c in cands:
         if not c or not os.path.isfile(c) or "python" not in os.path.basename(c).lower():
@@ -80,7 +85,19 @@ def deps_ok(py):
     return deps_error(py) is None
 
 
+def has_pip(py):
+    try:
+        return subprocess.run([py, "-m", "pip", "--version"], capture_output=True, timeout=60,
+                              **NO_WINDOW).returncode == 0
+    except Exception:
+        return False
+
+
 def install_cmd(py):
+    """The command that installs NEEDED into DEPS: KiCad's pip, or (KiCad's AppImage
+    has none) trouting_wheels.py, which fetches the same wheels from PyPI itself."""
+    if not has_pip(py):
+        return [py, "-u", os.path.join(HERE, "trouting_wheels.py"), DEPS] + NEEDED
     return [py, "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
             "--upgrade", "--target", DEPS] + NEEDED
 
@@ -264,7 +281,7 @@ class TroutingPlugin(pcbnew.ActionPlugin):
     def install(self, parent, py):
         import wx
         ask = wx.MessageBox("Trouting needs the Python packages %s, which KiCad's Python doesn't have.\n\n"
-                            "Install them now with pip (a 55 MB download, 215 MB on disk), into\n%s ?"
+                            "Install them now from PyPI (about 55 MB to download, 215 MB on disk), into\n%s ?"
                             % (", ".join(NEEDED), DEPS), "Trouting", wx.YES_NO | wx.ICON_QUESTION, parent)
         if ask != wx.YES:
             return False
