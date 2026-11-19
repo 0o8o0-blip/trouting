@@ -216,8 +216,8 @@ def main(argv=None):
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4, metavar="N",
                     help="setups to run at the same time (default: one per core, %(default)s here)")
     ap.add_argument("--max-minutes", type=float, metavar="M",
-                    help="time each router setup gets before it stops and keeps its best try (default 10; "
-                         "0: no limit)")
+                    help="time each router setup gets before it stops and keeps its best try "
+                         "(default: no limit, it routes until it's done)")
     ap.add_argument("--no-suggest", action="store_true",
                     help="if the board doesn't route fully, don't look for parts to move or rotate")
     ap.add_argument("--png", metavar="FILE",

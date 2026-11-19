@@ -47,7 +47,7 @@ class Options:
     pres_max = 1000.0
     hist_add = 0.3
     max_rounds = 150
-    max_secs = 600.0         # time for the negotiation; then the calmest round so far is kept (None: no limit)
+    max_secs = None          # time for the negotiation, then the calmest round so far is kept (None: no limit)
     near = 3.0               # mm the first search looks beyond its ends
     neighbour = 1.5          # mm: nets this close to a fight are rerouted with it
     neck_cost = 2.0          # a step of narrowed track costs this many of full width (0: never narrow)
