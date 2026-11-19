@@ -27,6 +27,27 @@ class Timeout(Exception):
         self.left = left
 
 
+def _watch_parent(alive):
+    """In a worker: exit when the process that started it is gone (killed, or
+    timed out), instead of routing on for nobody."""
+    import threading
+
+    def watch():
+        while alive():
+            time.sleep(1.0)
+        os._exit(1)
+    threading.Thread(target=watch, daemon=True).start()
+
+
+def _spawn_init(init, initargs):
+    import multiprocessing as mp
+    parent = mp.parent_process()
+    if parent is not None:
+        _watch_parent(parent.is_alive)
+    if init:
+        init(*initargs)
+
+
 def use_fork():
     return hasattr(os, "fork") and sys.platform != "darwin" and not os.environ.get("TROUTING_SPAWN")
 
@@ -57,6 +78,8 @@ def _pmap_fork(fn, items, jobs, deadline):
                 pid = os.fork()
                 if pid == 0:                           # the worker
                     os.close(r)
+                    ppid = os.getppid()
+                    _watch_parent(lambda: os.getppid() == ppid)
                     try:
                         out = ("ok", fn(item))
                     except BaseException:
@@ -110,7 +133,7 @@ def _pmap_spawn(fn, items, jobs, deadline, init, initargs):
     if not items:
         return
     n = max(1, min(jobs, len(items), 61))          # Windows waits on at most 63 handles
-    pool = mp.get_context("spawn").Pool(n, initializer=init, initargs=initargs)
+    pool = mp.get_context("spawn").Pool(n, initializer=_spawn_init, initargs=(init, initargs))
     try:
         it = pool.imap_unordered(functools.partial(_call, fn), items)
         for done in range(len(items)):

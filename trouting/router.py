@@ -47,6 +47,7 @@ class Options:
     pres_max = 1000.0
     hist_add = 0.3
     max_rounds = 150
+    max_secs = 600.0         # time for the negotiation; then the calmest round so far is kept (None: no limit)
     near = 3.0               # mm the first search looks beyond its ends
     neighbour = 1.5          # mm: nets this close to a fight are rerouted with it
     neck_cost = 2.0          # a step of narrowed track costs this many of full width (0: never narrow)
@@ -123,9 +124,9 @@ class Router:
         self.nets = []
         for n, terms in sorted(b.terminals.items()):
             if n in b.planes:
-                todo = [t for t in terms if not t["on_plane"]]
-                if not todo:
-                    continue
+                # kept even when all its pads are on the pour already: the other nets'
+                # tracks cut the pour, and the pieces they cut off need stitching back
+                pass
             elif len(terms) < 2:
                 continue
             self.nets.append(n)
@@ -861,6 +862,8 @@ class Router:
         self.history = []
         self.fights = []         # per round: the nets in a fight
         hot_xy = None            # near last round's fights (xy cells)
+        best = None              # (cells in a fight, paths, failed) of the calmest round so far
+        self.out_of_time = False
         for rnd in range(1, o.max_rounds + 1):
             for n in todo:
                 old = self.paths.get(n, [])
@@ -893,6 +896,25 @@ class Router:
                   % (rnd, len(todo), len(bad), sum(bad.values()), time.time() - t0))
             if not bad:
                 break
+            if o.max_secs is not None:
+                cells = sum(bad.values())
+                if best is None or cells < best[0]:
+                    best = (cells, {m: list(self.paths.get(m, [])) for m in self.nets},
+                            {m: list(self.failed.get(m, [])) for m in self.nets})
+                if time.time() - t0 > o.max_secs:
+                    # a fight can go on for many rounds and still be won (or not at all):
+                    # out of time, the calmest round is what settles
+                    self.out_of_time = True
+                    if cells > best[0]:
+                        for m in list(self.stamped):
+                            self.stamp(m, -1)
+                        self.paths, self.failed = best[1], best[2]
+                        for m in self.nets:
+                            self.stamp(m, +1)
+                        self.stamped = set(self.nets)
+                    o.log("out of time after %d rounds: kept round %s's routes (%d cells in a fight)"
+                          % (rnd, next(r for r, _, c in self.history if c == best[0]), best[0]))
+                    break
             hot = []
             for n in bad:
                 hot.append(self.conflicts(n, o.hist_add))

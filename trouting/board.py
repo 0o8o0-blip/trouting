@@ -21,10 +21,17 @@ NO_NET = -1        # copper of no net, board edge, keepouts, holes: in everyone'
 MARGIN = 0.01      # mm on every clearance, for the grid's straight lines between cell centres
 
 
-def poly_of(rings):
-    ps = [Polygon(r) for r in rings if len(r) >= 3]
+def poly_of(rings, holes=None):
+    """Outlines (lists of points) as one shape; holes: per outline, its holes."""
+    holes = holes or [[]] * len(rings)
+    ps = [Polygon(r, [h for h in hs if len(h) >= 3]) for r, hs in zip(rings, holes) if len(r) >= 3]
     ps = [p if p.is_valid else p.buffer(0) for p in ps]
     return unary_union(ps) if ps else Polygon()
+
+
+def shape_of(item):
+    """A zone's, keepout's or copper shape's area, its holes cut out."""
+    return poly_of(item["polys"], item.get("holes"))
 
 
 class Board:
@@ -121,7 +128,7 @@ class Board:
         for s in d["copper_shapes"]:
             n = self.ni.get(s["net"], NO_NET) if s["net"] else NO_NET
             if s["layer"] in self.li:
-                self.items.append((self.li[s["layer"]], poly_of(s["polys"]), n, self.net_clr(n), False))
+                self.items.append((self.li[s["layer"]], shape_of(s), n, self.net_clr(n), False))
         for t in d["tracks"]:          # what dump kept: locked (or all, without --rip-up)
             n = self.ni.get(t["net"], NO_NET)
             if t["layer"] in self.li:
@@ -138,7 +145,7 @@ class Board:
                 self.items.append((l, g, NO_NET, self.hole_clr, True))
         for k in d["keepouts"]:
             if k["tracks"]:
-                g = poly_of(k["polys"])
+                g = shape_of(k)
                 for ln in k["layers"]:
                     if ln in self.li:
                         self.items.append((self.li[ln], g, NO_NET, 0.0, True))
@@ -183,7 +190,7 @@ class Board:
         self.via_block = np.zeros(L * WH, np.uint8)
         for k in self.d["keepouts"]:
             if k["vias"]:
-                g = poly_of(k["polys"]).buffer(vmax / 2)
+                g = shape_of(k).buffer(vmax / 2)
                 for ln in k["layers"]:
                     if ln in self.li:
                         self.via_block[self.cells_in(g, self.li[ln])] = 1
@@ -216,15 +223,15 @@ class Board:
         mine = [p for p in self.d["pours"] if self.ni.get(p["net"]) == n and ln in p["layers"]]
         if not mine:
             return Polygon()
-        region = unary_union([poly_of(p["polys"]) for p in mine]).intersection(self.outline)
+        region = unary_union([shape_of(p) for p in mine]).intersection(self.outline)
         prio = min(p["priority"] for p in mine)
         for k in self.d["keepouts"]:
             if k.get("pours") and ln in k["layers"]:
-                region = region.difference(poly_of(k["polys"]))
+                region = region.difference(shape_of(k))
         for p in self.d["pours"]:
             m = self.ni.get(p["net"])
             if m != n and ln in p["layers"] and p["priority"] > prio:
-                region = region.difference(poly_of(p["polys"]).buffer(self.net_clr(n)))
+                region = region.difference(shape_of(p).buffer(self.net_clr(n)))
         return region
 
     def pour_rules(self, n, l):

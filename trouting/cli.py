@@ -70,7 +70,8 @@ def kicad():
         subprocess.run([sys.executable, "-c", "import pcbnew"], check=True, capture_output=True)
         py = [sys.executable]
         work = tempfile.mkdtemp(prefix="trouting-")
-        cli = shutil.which("kicad-cli") or shutil.which(os.path.join(os.path.dirname(sys.executable), "kicad-cli"))
+        cli = shutil.which("kicad-cli") or shutil.which(os.path.join(os.path.dirname(sys.executable), "kicad-cli")) \
+            or installed_kicad()[1]              # macOS: KiCad's Python is in KiCad.app, kicad-cli elsewhere in it
     except subprocess.CalledProcessError:
         if os.name == "nt" or sys.platform == "darwin":
             exe, cli = installed_kicad()
@@ -127,6 +128,7 @@ def drc(cli, pcb, work, name):
 # ---- routing, several setups at once ----
 _BOARD = None
 _PNG_DIR = None                                  # set when --png is asked for: each setup draws its result here
+_MAX_SECS = "default"                            # each setup's time to negotiate (router Options.max_secs)
 
 
 def _route(setup):
@@ -134,6 +136,8 @@ def _route(setup):
     via_cost, plane_cost = setup
     o = Options()
     o.via_cost, o.plane_layer_cost = via_cost, plane_cost
+    if _MAX_SECS != "default":
+        o.max_secs = _MAX_SECS
     o.log = lambda *a: None
     t = time.time()
     r = Router(_BOARD, o).run()
@@ -152,13 +156,13 @@ def _route(setup):
         render(r, png)
     return {"setup": setup, "out": out, "unrouted": n_unrouted, "vias": len(out["vias"]), "png": png,
             "length": round(length, 1), "hot": hot, "hot_all": hot_all, "rounds": len(r.history), "secs": round(time.time() - t, 1),
-            "stitches": getattr(r, "stitches", 0)}
+            "stitches": getattr(r, "stitches", 0), "out_of_time": r.out_of_time}
 
 
-def _init_route(board_json, png_dir):
+def _init_route(board_json, png_dir, max_secs="default"):
     """Each worker's board (on Windows a worker is a fresh Python and reads it itself)."""
-    global _BOARD, _PNG_DIR, _BOARD_FROM
-    _PNG_DIR = png_dir
+    global _BOARD, _PNG_DIR, _BOARD_FROM, _MAX_SECS
+    _PNG_DIR, _MAX_SECS = png_dir, max_secs
     if _BOARD is None or _BOARD_FROM != board_json:
         from .board import Board
         with open(board_json, encoding="utf-8") as fh:
@@ -169,9 +173,9 @@ def _init_route(board_json, png_dir):
 _BOARD_FROM = None
 
 
-def route_portfolio(board_json, tries, jobs, log, png_dir=None):
+def route_portfolio(board_json, tries, jobs, log, png_dir=None, max_secs="default"):
     t = time.time()
-    _init_route(board_json, png_dir)
+    _init_route(board_json, png_dir, max_secs)
     log("board read: %d x %d cells x %d layers, %d nets to join (%.1fs)"
         % (_BOARD.W, _BOARD.H, _BOARD.L, sum(1 for ts in _BOARD.terminals.values() if len(ts) > 1), time.time() - t))
     setups = SETUPS[:tries]
@@ -181,9 +185,10 @@ def route_portfolio(board_json, tries, jobs, log, png_dir=None):
     try:
         # forked workers share the board read above; spawned ones read it again
         for res in pmap(_route, setups, min(jobs, len(setups)), deadline=lambda: deadline[0],
-                        init=_init_route, initargs=(board_json, png_dir)):
-            log("  setup via %4.1f, plane %.1f: %2d unrouted, %3d vias, %6.0f mm  (%d rounds, %.0fs)"
-                % (res["setup"] + (res["unrouted"], res["vias"], res["length"], res["rounds"], res["secs"])))
+                        init=_init_route, initargs=(board_json, png_dir, max_secs)):
+            log("  setup via %4.1f, plane %.1f: %2d unrouted, %3d vias, %6.0f mm  (%d rounds, %.0fs%s)"
+                % (res["setup"] + (res["unrouted"], res["vias"], res["length"], res["rounds"], res["secs"],
+                                   ", out of time" if res["out_of_time"] else "")))
             results.append(res)
             # one setup routed everything: the others get half as long again to do it with
             # fewer vias, then the best so far is taken
@@ -210,6 +215,9 @@ def main(argv=None):
                     help="router setups to try, best result kept (1-%d, default %%(default)s)" % len(SETUPS))
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4, metavar="N",
                     help="setups to run at the same time (default: one per core, %(default)s here)")
+    ap.add_argument("--max-minutes", type=float, metavar="M",
+                    help="time each router setup gets before it stops and keeps its best try (default 10; "
+                         "0: no limit)")
     ap.add_argument("--no-suggest", action="store_true",
                     help="if the board doesn't route fully, don't look for parts to move or rotate")
     ap.add_argument("--png", metavar="FILE",
@@ -237,7 +245,8 @@ def main(argv=None):
             log("  " + l)
         before, before_unc = drc(cli, w_src, work, "before")
 
-        best = route_portfolio(j, a.tries, a.jobs, log, work if a.png else None)
+        best = route_portfolio(j, a.tries, a.jobs, log, work if a.png else None,
+                               "default" if a.max_minutes is None else (a.max_minutes * 60 or None))
         routes = os.path.join(work, "routes.json")
         with open(routes, "w", encoding="utf-8") as fh:
             json.dump(best["out"], fh)

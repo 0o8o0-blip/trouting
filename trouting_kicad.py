@@ -33,9 +33,16 @@ def pt(p):
 
 
 def polys(polyset):
-    """A SHAPE_POLY_SET as a list of outlines (holes dropped: pads have none)."""
+    """A SHAPE_POLY_SET's outlines, as lists of points (their holes: holes())."""
     return [[pt(o.CPoint(k)) for k in range(o.PointCount())]
             for o in (polyset.Outline(i) for i in range(polyset.OutlineCount()))]
+
+
+def holes(polyset):
+    """The holes of each of polys(polyset)'s outlines (a zone drawn as a frame
+    has one; read without it, it would cover the frame's middle too)."""
+    return [[[pt(h.CPoint(k)) for k in range(h.PointCount())] for h in (polyset.Hole(i, j) for j in range(polyset.HoleCount(i)))]
+            for i in range(polyset.OutlineCount())]
 
 
 def copper_layers(board):
@@ -129,6 +136,13 @@ def dump(board, path, rip_up):
                     e["shapes"][n] = polys(ps)
             if not e["shapes"]:
                 continue
+            if npth:
+                # KiCad's DRC holds an NPTH pad's copper ring against tracks on every layer
+                # its hole goes through, also those where the pad has no copper (inner
+                # layers): keep clear of it everywhere
+                ring = max(e["shapes"].values(), key=lambda r: sum(len(x) for x in r))
+                for n in names:
+                    e["shapes"].setdefault(n, ring)
             if p.HasHole() and not npth:
                 dr = p.GetDrillSize()
                 e["drill_r"] = mm(max(dr.x, dr.y)) / 2
@@ -139,13 +153,13 @@ def dump(board, path, rip_up):
                 g.TransformShapeToPolygon(ps, g.GetLayer(), 0, EPS, pcbnew.ERROR_INSIDE)
                 d["copper_shapes"].append({"ref": ref, "layer": board.GetLayerName(g.GetLayer()),
                                            "net": g.GetNetname() if hasattr(g, "GetNetname") else "",
-                                           "polys": polys(ps)})
+                                           "polys": polys(ps), "holes": holes(ps)})
     for g in board.GetDrawings():
         if isinstance(g, pcbnew.PCB_SHAPE) and g.IsOnCopperLayer() and g.GetLayer() in cu:
             ps = pcbnew.SHAPE_POLY_SET()
             g.TransformShapeToPolygon(ps, g.GetLayer(), 0, EPS, pcbnew.ERROR_INSIDE)
             d["copper_shapes"].append({"layer": board.GetLayerName(g.GetLayer()),
-                                       "net": g.GetNetname(), "polys": polys(ps)})
+                                       "net": g.GetNetname(), "polys": polys(ps), "holes": holes(ps)})
 
     zones = [(z, None) for z in board.Zones()]
     for f in board.GetFootprints():
@@ -158,7 +172,7 @@ def dump(board, path, rip_up):
             d["keepouts"].append({"ref": zref, "name": z.GetZoneName(), "layers": zl,
                                   "tracks": z.GetDoNotAllowTracks(), "vias": z.GetDoNotAllowVias(),
                                   "pads": z.GetDoNotAllowPads(), "pours": z.GetDoNotAllowZoneFills() if hasattr(z, "GetDoNotAllowZoneFills") else z.GetDoNotAllowCopperPour(),
-                                  "polys": polys(z.Outline())})
+                                  "polys": polys(z.Outline()), "holes": holes(z.Outline())})
         elif zl:
             lc = z.GetLocalClearance()
             lc = lc.value() if hasattr(lc, "value") else lc      # KiCad 9: std::optional
@@ -167,7 +181,7 @@ def dump(board, path, rip_up):
                                "thermal_gap": mm(z.GetThermalReliefGap()),
                                "spoke_width": mm(z.GetThermalReliefSpokeWidth()),
                                "pad_connection": int(z.GetPadConnection()),
-                               "polys": polys(z.Outline())})
+                               "polys": polys(z.Outline()), "holes": holes(z.Outline())})
 
     for t in board.GetTracks():
         if rip_up and is_unlocked_copper(t):

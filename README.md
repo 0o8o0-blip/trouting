@@ -64,7 +64,9 @@ up to a clean DRC. The Intel Mac build is made but not tested.
 
 It routes 12 setups at once and keeps the best, so it is quicker the more cores
 you have: the stuck demo below, suggestions included, takes about 7 minutes on
-12 cores and over 20 on 4.
+12 cores and over 20 on 4. Each setup gets at most 10 minutes; a board it can't
+finish by then comes back with its best try and the nets it couldn't route
+(`--max-minutes` changes that, 0 for no limit).
 
 ## From the command line
 

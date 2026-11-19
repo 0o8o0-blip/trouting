@@ -27,10 +27,14 @@ def _build(so):
         if not exe:
             continue
         os.makedirs(os.path.dirname(so), exist_ok=True)
-        base = [exe, "-O3", "-shared", "-fPIC", "-Wall", "-o", so, SRC, "-lm"]
+        # into a file of our own, then renamed into place: with spawn (Windows, macOS)
+        # every worker may build at once, and none may load a half-written library
+        tmp = "%s.%d.tmp" % (so, os.getpid())
+        base = [exe, "-O3", "-shared", "-fPIC", "-Wall", "-o", tmp, SRC, "-lm"]
         # -march=native: fastest here; some compilers (older Apple clang) don't know it
         if subprocess.run(base[:2] + ["-march=native"] + base[2:], capture_output=True).returncode:
             subprocess.check_call(base)
+        os.replace(tmp, so)
         return True
     return False
 

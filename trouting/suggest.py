@@ -23,7 +23,7 @@ import numpy as np
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
-from .board import poly_of
+from .board import poly_of, shape_of
 
 ROTATIONS = (90, 180, 270)
 STEPS = (0.5, 1.0, 2.0)                      # mm
@@ -81,6 +81,8 @@ def moved(d, ref, rot=0, dx=0.0, dy=0.0):
         for i, x in enumerate(e[key]):
             if x.get("ref") == ref:
                 e[key][i] = dict(x, **{poly_key: _rings(x[poly_key], f)})
+                if x.get("holes"):
+                    e[key][i]["holes"] = [_rings(hs, f) for hs in x["holes"]]
     return e
 
 
@@ -138,7 +140,7 @@ class Space:
                 fixed.setdefault(l, []).append(Point(v["at"]).buffer(v["d"] / 2, 16))
         for c in d["copper_shapes"]:
             if not c.get("ref"):
-                fixed.setdefault(c["layer"], []).append(poly_of(c["polys"]))
+                fixed.setdefault(c["layer"], []).append(shape_of(c))
         for l, gs in fixed.items():
             per.setdefault((None, l), []).extend(gs)
         # a part with kept copper on its pads is held where it is (a locked stub, vias in its pad)
