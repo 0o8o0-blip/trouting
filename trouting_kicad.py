@@ -45,6 +45,28 @@ def holes(polyset):
             for i in range(polyset.OutlineCount())]
 
 
+def add_copper_drawing(board, g, cu, d, ref):
+    """A drawn item on a copper layer as copper: a shape, or text (copper text is copper
+    too; a track through it is a short). Hidden text isn't there."""
+    kinds = tuple(getattr(pcbnew, k) for k in ("PCB_SHAPE", "PCB_TEXT", "PCB_TEXTBOX") if hasattr(pcbnew, k))
+    if not isinstance(g, kinds) or not g.IsOnCopperLayer() or g.GetLayer() not in cu:
+        return
+    if isinstance(g, pcbnew.PCB_TEXT) and hasattr(g, "IsVisible") and not g.IsVisible():
+        return
+    ps = pcbnew.SHAPE_POLY_SET()
+    try:
+        g.TransformShapeToPolygon(ps, g.GetLayer(), 0, EPS, pcbnew.ERROR_INSIDE)
+    except Exception:
+        return
+    if not ps.OutlineCount():
+        return
+    e = {"layer": board.GetLayerName(g.GetLayer()), "net": g.GetNetname() if hasattr(g, "GetNetname") else "",
+         "polys": polys(ps), "holes": holes(ps)}
+    if ref is not None:
+        e["ref"] = ref
+    d["copper_shapes"].append(e)
+
+
 def copper_layers(board):
     return [l for l in board.GetEnabledLayers().CuStack()]
 
@@ -147,19 +169,12 @@ def dump(board, path, rip_up):
                 dr = p.GetDrillSize()
                 e["drill_r"] = mm(max(dr.x, dr.y)) / 2
             d["pads"].append(e)
-        for g in f.GraphicalItems():            # copper drawn in footprints (antennas, coils, logos)
-            if isinstance(g, pcbnew.PCB_SHAPE) and g.IsOnCopperLayer() and g.GetLayer() in cu:
-                ps = pcbnew.SHAPE_POLY_SET()
-                g.TransformShapeToPolygon(ps, g.GetLayer(), 0, EPS, pcbnew.ERROR_INSIDE)
-                d["copper_shapes"].append({"ref": ref, "layer": board.GetLayerName(g.GetLayer()),
-                                           "net": g.GetNetname() if hasattr(g, "GetNetname") else "",
-                                           "polys": polys(ps), "holes": holes(ps)})
+        # copper drawn in footprints (antennas, coils, logos), and its text and fields on copper
+        fields = list(f.GetFields()) if hasattr(f, "GetFields") else [f.Reference(), f.Value()]
+        for g in list(f.GraphicalItems()) + fields:
+            add_copper_drawing(board, g, cu, d, ref)
     for g in board.GetDrawings():
-        if isinstance(g, pcbnew.PCB_SHAPE) and g.IsOnCopperLayer() and g.GetLayer() in cu:
-            ps = pcbnew.SHAPE_POLY_SET()
-            g.TransformShapeToPolygon(ps, g.GetLayer(), 0, EPS, pcbnew.ERROR_INSIDE)
-            d["copper_shapes"].append({"layer": board.GetLayerName(g.GetLayer()),
-                                       "net": g.GetNetname(), "polys": polys(ps), "holes": holes(ps)})
+        add_copper_drawing(board, g, cu, d, None)
 
     zones = [(z, None) for z in board.Zones()]
     for f in board.GetFootprints():
