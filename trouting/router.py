@@ -52,6 +52,8 @@ class Options:
     neighbour = 1.5          # mm: nets this close to a fight are rerouted with it
     neck_cost = 2.0          # a step of narrowed track costs this many of full width (0: never narrow)
     neck_width = None        # mm the wide nets narrow to (None: the Default class width, at least min track)
+    fanout_neck = True       # nets of the Default width may narrow to the board's minimum track,
+    fanout_mm = 1.0          # this close to their own pads (to get out from between fine-pitch pins)
     neck_switch = 6.0        # cells of track a change of width costs (else it flickers wide-narrow-wide)
     turn_cost = 0.3          # cells a change of direction costs (against needless zig-zags)
     spoke_cost = 0.0         # extra cost per step across a thermal pad's spoke and where it lands
@@ -71,7 +73,28 @@ class Router:
         min_track = b.d["rules"].get("min_track") or 0.0
         dflt = [r["width"] for r in rules if r.get("class") == "Default"]
         nw = self.o.neck_width or max(min_track, min(dflt) if dflt else min_track)
-        self.neck_w = [nw if self.o.neck_cost > 0 and 0 < nw < r["width"] - 1e-6 else None for r in rules]
+        # nets of the Default width (or narrower) may narrow to the board's minimum track
+        # where pins are too close for their full width, as people route fine-pitch
+        # chips (a board without a minimum track width: never)
+        def neck(w):
+            for x, near in ((nw, False), (min_track if self.o.fanout_neck and not self.o.neck_width else 0.0, True)):
+                if self.o.neck_cost > 0 and 0 < x < w - 1e-6:
+                    return x, near
+            return None, False
+        necks = [neck(r["width"]) for r in rules]
+        self.neck_w = [x for x, _ in necks]
+        # a net that would narrow only to get out from between fine-pitch pins: only
+        # if a pad of it is boxed in for the full width, and only near those pads
+        self.neck_cells = {}
+        for n, (x, near) in enumerate(necks):
+            if x and near and not (len(b.terminals.get(n, [])) >= 2 or n in b.planes):
+                self.neck_w[n] = None            # nothing to route
+            elif x and near:
+                cells = self.boxed_in(n, rules[n]["width"])
+                if cells is None:
+                    self.neck_w[n] = None
+                else:
+                    self.neck_cells[n] = cells
         # shape classes: each distinct (track width, clearance) and (via size, drill,
         # clearance). A net stamps, for each class, how close that shape's centre may
         # come to its copper, so "may a shape of class k go here" is one lookup.
@@ -223,6 +246,48 @@ class Router:
         self.failed = {}         # net -> list of terminals it couldn't reach
         self.stamped = set()
         self.hard = False        # the repair pass: other nets' copper is a wall
+
+    def boxed_in(self, n, w):
+        """Cells near net n's pads from which a track of width w can't get out (fixed
+        copper all round, as between fine-pitch pins): within fanout_mm of them, on
+        their layers. None if every pad lets the full width out."""
+        b = self.b
+        thr, R = w / 2 + MARGIN, self.o.fanout_mm
+        eight = np.ones((3, 3), bool)
+        out = []
+        for t in b.terminals.get(n, []):
+            for it in t["items"]:
+                if it["kind"] != "pad":
+                    continue
+                escapes = False
+                for l, g in it["geoms"].items():
+                    gx0, gy0, gx1, gy1 = g.bounds
+                    xa, ya = b.to_cell(gx0 - R, gy0 - R)
+                    xb, yb = b.to_cell(gx1 + R, gy1 + R)
+                    xa, ya, xb, yb = max(xa, 0), max(ya, 0), min(xb, b.W - 1), min(yb, b.H - 1)
+                    h, wd = yb - ya + 1, xb - xa + 1
+                    ys, xs = np.mgrid[ya:yb + 1, xa:xb + 1]
+                    ok = (b.static_d(n, (l * b.WH + ys * b.W + xs).ravel()) >= thr).reshape(h, wd)
+
+                    def local(cells):
+                        m = np.zeros((h, wd), bool)
+                        xy = cells - l * b.WH
+                        yy, xx = xy // b.W - ya, xy % b.W - xa
+                        sel = (yy >= 0) & (yy < h) & (xx >= 0) & (xx < wd)
+                        m[yy[sel], xx[sel]] = True
+                        return m
+                    ok |= local(b.cells_in(g, l, shrink=w / 2))      # its own copper
+                    start = local(b.cells_in(g, l)) & ok
+                    if not start.any():
+                        continue
+                    lab, _ = ndimage.label(ok, structure=eight)
+                    border = set(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]).tolist()) - {0}
+                    if border & set(lab[start].tolist()):
+                        escapes = True
+                        break
+                if not escapes:
+                    out += [b.cells_in(g.buffer(R), l) for l, g in it["geoms"].items()]
+        return np.unique(np.concatenate(out)).astype(np.int32) if out else None
 
     def reserve_spokes(self):
         """Per thermal pad, the spokes that can land (the pour is there to land on)
@@ -574,7 +639,8 @@ class Router:
                                    box, tbox, self.o.via_cost, pres, hard=self.hard,
                                    kt2=p["kt2"], thr2=p["thr2"], own2=self.own2.get(n),
                                    neck_cost=self.o.neck_cost if self.neck_w[n] else 0.0,
-                                   neck_switch=self.o.neck_switch, turn_cost=self.o.turn_cost)
+                                   neck_switch=self.o.neck_switch, turn_cost=self.o.turn_cost,
+                                   neck=self.neck_cells.get(n))
             if path is None:
                 return None
             bad = self.close_vias(n, path)

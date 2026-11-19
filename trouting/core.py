@@ -74,6 +74,7 @@ def _lib():
     lib.g_hist.argtypes = [P]
     lib.g_begin.argtypes = [P, i]
     lib.g_mark.argtypes = [P, P, l, i]
+    lib.g_neck_region.argtypes = [P, i]
     lib.g_seed.restype = l
     lib.g_seed.argtypes = [P, P, l, i, f, f, i, i, i, f, i, i, i, i, i, f]
     lib.g_route.restype = l
@@ -86,7 +87,7 @@ def _lib():
 
 LIB = _lib()
 
-M_SRC, M_TGT, M_OWN, M_NOVIA, M_OWN2 = 1, 2, 4, 8, 16
+M_SRC, M_TGT, M_OWN, M_NOVIA, M_OWN2, M_NECK = 1, 2, 4, 8, 16, 32
 
 
 class Path(np.ndarray):
@@ -134,14 +135,16 @@ class Grid:
             self.g = None
 
     def route(self, net, cc, kt, kv, thr, vthr, src, tgt, own, novia, bbox, tbox,
-              via_cost, pres, hmul=1.0, hard=False, kt2=None, thr2=None, own2=None, neck_cost=0.0, neck_switch=4.0, turn_cost=0.0):
+              via_cost, pres, hmul=1.0, hard=False, kt2=None, thr2=None, own2=None, neck_cost=0.0, neck_switch=4.0, turn_cost=0.0, neck=None):
         """A path (a Path, source first) or None. With neck_cost > 0 the track may
-        narrow to class kt2 (threshold thr2, own copper own2) where it has to."""
+        narrow to class kt2 (threshold thr2, own copper own2) where it has to; with
+        neck (nodes), only there."""
         LIB.g_begin(self.g, cc)
         narrow = neck_cost > 0
         marks = [(src, M_SRC), (tgt, M_TGT), (own, M_OWN), (novia, M_NOVIA)]
         if narrow:
-            marks += [(own, M_OWN2), (own2, M_OWN2)]
+            marks += [(own, M_OWN2), (own2, M_OWN2), (neck, M_NECK)]
+        LIB.g_neck_region(self.g, int(narrow and neck is not None))
         for arr, bit in marks:
             if arr is not None and len(arr):
                 a = i32(arr)

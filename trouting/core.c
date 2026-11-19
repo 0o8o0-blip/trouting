@@ -48,16 +48,17 @@ typedef struct {
     uint32_t *seen;         /* generation when g/parent were set */
     uint32_t *mark_gen;
     uint8_t *mark;          /* 1 source, 2 target, 4 own copper (always allowed), 8 no via,
-                               16 own copper for a narrow track */
+                               16 own copper for a narrow track, 32 a narrow track may go here */
     uint32_t *stamp_gen;
     uint32_t gen, sgen;
+    int neck_region;        /* narrow tracks only where marked M_NECK (else anywhere) */
     /* heap */
     float *hf;
     int32_t *hn;
     int64_t hcap, hlen;
 } grid_t;
 
-enum { M_SRC = 1, M_TGT = 2, M_OWN = 4, M_NOVIA = 8, M_OWN2 = 16 };
+enum { M_SRC = 1, M_TGT = 2, M_OWN = 4, M_NOVIA = 8, M_OWN2 = 16, M_NECK = 32 };
 
 grid_t *g_new(int W, int H, int L, int K, int C, const float *d1, const float *d2, const int32_t *n1,
               const uint8_t *via_block, const float *layer_cost)
@@ -137,8 +138,13 @@ static inline int static_ok(const grid_t *G, int64_t v, int net, float thr)
 
 static inline int track_ok(const grid_t *G, int64_t v, int net, float thr, int narrow)
 {
-    return static_ok(G, v, net, thr) || (mk(G, v) & (narrow ? M_OWN2 : M_OWN));
+    if (narrow)
+        return (mk(G, v) & M_OWN2) || ((!G->neck_region || (mk(G, v) & M_NECK)) && static_ok(G, v, net, thr));
+    return static_ok(G, v, net, thr) || (mk(G, v) & M_OWN);
 }
+
+/* Narrow tracks only on cells marked M_NECK (on), or wherever they fit (off). */
+void g_neck_region(grid_t *G, int on) { G->neck_region = on; }
 
 static int via_ok(const grid_t *G, int64_t xy, int net, float vthr)
 {
