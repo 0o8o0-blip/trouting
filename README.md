@@ -33,8 +33,9 @@ a ground pour**, QFNs, an ESP32 module, fine-pitch connectors.
 - **Native to KiCad.** No Java and no Specctra DSN/SES export and import. It
   reads and writes the `.kicad_pcb` through KiCad's own Python module.
 
-Status: young but working. It routes all ten real boards in its test set to zero
-unconnected pads (see Results). It runs on Linux, Windows and macOS with KiCad 9 and 10.
+Status: young but working. On the public [PCBWorld](https://github.com/LGAI-Research/PCBWorld)
+benchmark it routes all 119 boards fully connected and free of DRC errors (see Results). It runs
+on Linux, Windows and macOS with KiCad 9 and 10.
 
 ## In KiCad: the plugin
 
@@ -166,19 +167,29 @@ This takes about as long again as the routing. `--no-suggest` skips it.
 
 ## Results
 
-Trouting is tested on ten real boards, routed from scratch with each board's
-own rules. They are 2-layer boards with 3 to 64 nets, in files from KiCad 4
-to 9. KiCad's DRC finds **no unconnected pads** on any of them. The new DRC
-warnings are a few starved thermals (GND pads, usually QFN pins, that the pour
-reaches with fewer than two spokes), plus isolated copper on one board from a
-pour that isn't GND (see Limitations). A board takes from a few seconds to
-about three minutes on a 24-thread Linux PC.
+**PCBWorld** ([arXiv:2607.05915](https://arxiv.org/abs/2607.05915)), a public routing benchmark
+on real open-source KiCad boards, scored by its own pipeline with KiCad's DRC. Clean pass: the
+share of boards fully connected *and* with zero DRC errors.
+
+| Set | Boards | Trouting | Freerouting | KiCadRoutingTools | Best RL agent |
+|---|---|---|---|---|---|
+| D3-A | 99 | **1.00** | 0.80 | 0.74 | 0.94 |
+| D3-B | 10 | **1.00** | 0.78 | 0.20 | 0.45 |
+| D3-C | 10 | **1.00** | – | – | – |
+
+The others' numbers are the paper's. The D3 boards are small to medium (D3-A: 6 to 31 pads);
+how it was run, the cross-checks and the caveats are in [docs/benchmarks.md](docs/benchmarks.md).
+
+**31 public, hand-routed boards** from GitHub (53 to 667 pads, six of them 4-layer): 24 end with
+every pad connected. **Ten boards of our own** (2-layer, 3 to 64 nets): all ten.
 
 ## Limitations
 
 What it doesn't do yet:
 
-- **4-layer boards** are not tested yet.
+- **Escaping fine-pitch chips** (QFP, BGA) on dense boards: where many pins have to get out
+  from under one chip, it can leave a few of them unrouted.
+- **More than two layers** is tested on a few boards only, and inner layers mostly as pours.
 - **Pours on nets other than the plane net** (a +3V3 pour, say) aren't
   modelled, so they can be left with isolated copper.
 - **Differential pairs and length matching** are not supported.

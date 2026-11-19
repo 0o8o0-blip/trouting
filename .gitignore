@@ -11,3 +11,4 @@ plugin/_deps/
 dist/
 trouting/prebuilt/
 test/public/
+test/pcbworld/
