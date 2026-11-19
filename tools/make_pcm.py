@@ -87,7 +87,7 @@ def main():
     ap.add_argument("--mac-cores-to", metavar="DIR", help="on a Mac: build just its cores, into DIR")
     a = ap.parse_args()
     src = os.path.join(ROOT, "trouting", "core.c")
-    h = hashlib.sha1(open(src, "rb").read()).hexdigest()[:12]
+    h = hashlib.sha1(open(src, "rb").read().replace(b"\r\n", b"\n")).hexdigest()[:12]      # as trouting/core.py names it
     if a.mac_cores_to:
         os.makedirs(a.mac_cores_to, exist_ok=True)
         for arch in ("arm64", "x86_64"):

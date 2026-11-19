@@ -20,6 +20,12 @@ def platform_tag():
     return "%s-%s" % (sys.platform, platform.machine().lower())
 
 
+def src_hash():
+    """core.c's hash, the same whatever line endings it was checked out with
+    (git on Windows may give CRLF): it names the builds, and the prebuilt ones."""
+    return hashlib.sha1(open(SRC, "rb").read().replace(b"\r\n", b"\n")).hexdigest()[:12]
+
+
 def _build(so):
     """Compile core.c to `so` with the first C compiler found; False if there is none."""
     for cc in ("gcc", "cc", "clang"):
@@ -34,13 +40,21 @@ def _build(so):
         # -march=native: fastest here; some compilers (older Apple clang) don't know it
         if subprocess.run(base[:2] + ["-march=native"] + base[2:], capture_output=True).returncode:
             subprocess.check_call(base)
-        os.replace(tmp, so)
+        try:
+            os.replace(tmp, so)
+        except OSError:              # Windows: another worker's build is in place and loaded
+            if not os.path.exists(so):
+                raise
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
         return True
     return False
 
 
 def _lib():
-    h = hashlib.sha1(open(SRC, "rb").read()).hexdigest()[:12]
+    h = src_hash()
     so = os.path.join(HERE, "_build", "core-%s%s" % (h, EXT))
     # no compiler (KiCad's own Python, inside the snap, on Windows): a build that
     # came with Trouting for this platform and this core.c
