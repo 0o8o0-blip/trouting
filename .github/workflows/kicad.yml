@@ -114,7 +114,7 @@ jobs:
 
   linux-appimage:
     # KiCad's AppImage: its Python has no pip (the plugin fetches the wheels itself) and
-    # ignores PYTHONPATH. Unpacked (runners have no FUSE), with APPDIR set as its launcher does.
+    # ignores PYTHONPATH. Run mounted, as users run it (unpacked, its Python's paths are wrong).
     needs: package
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -127,14 +127,20 @@ jobs:
           name: pcm
           path: dist
 
-      - name: Install KiCad (AppImage, unpacked)
+      - name: Install KiCad (AppImage)
         run: |
+          sudo apt-get update && sudo apt-get install -y libfuse2t64
           cd "$RUNNER_TEMP"
           curl -sSL -o kicad.tar "https://github.com/KiCad/kicad-source-mirror/releases/download/$KICAD_APPIMAGE/kicad-$KICAD_APPIMAGE-x86_64.AppImage.tar"
-          tar -xf kicad.tar && chmod +x kicad-*.AppImage && ./kicad-*.AppImage --appimage-extract > /dev/null
-          echo "APPDIR=$RUNNER_TEMP/squashfs-root" >> "$GITHUB_ENV"
-          echo "KPY=$RUNNER_TEMP/squashfs-root/bin/$(ls squashfs-root/bin | grep -E '^python3\.[0-9]+$')" >> "$GITHUB_ENV"
-          echo "KCLI=$RUNNER_TEMP/squashfs-root/bin/kicad-cli" >> "$GITHUB_ENV"
+          tar -xf kicad.tar && mv kicad-*.AppImage kicad.AppImage && chmod +x kicad.AppImage
+          # with arguments the AppImage runs the program named (its launcher, sharun), not KiCad
+          py=python3.11                  # KiCad 9.0.9's AppImage
+          ./kicad.AppImage $py -c "import sys, pcbnew; print(sys.version, pcbnew.Version())"
+          printf '#!/bin/sh\nexec %s %s "$@"\n' "$RUNNER_TEMP/kicad.AppImage" "$py" > kpy
+          printf '#!/bin/sh\nexec %s kicad-cli "$@"\n' "$RUNNER_TEMP/kicad.AppImage" > kcli
+          chmod +x kpy kcli
+          echo "KPY=$RUNNER_TEMP/kpy" >> "$GITHUB_ENV"
+          echo "KCLI=$RUNNER_TEMP/kcli" >> "$GITHUB_ENV"
 
       - name: KiCad's Python
         run: |
