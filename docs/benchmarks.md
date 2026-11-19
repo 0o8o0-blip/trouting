@@ -64,8 +64,8 @@ A second set: 31 open-source KiCad boards from GitHub that people routed by hand
 and 6 four-layer, with 53 to 667 pads (keyboards, USB hubs, ESP32/RP2040/STM32 boards, audio,
 power). Each is routed from scratch with its own rules, and checked with KiCad's DRC.
 
-24 of the 31 end with every pad connected, 16 of them with no DRC item the board didn't have
-before. The other 7 leave 23 pads unconnected in all, mostly where a fine-pitch chip's pins have
+25 of the 31 end with every pad connected, 16 of them with no DRC item the board didn't have
+before. The other 6 leave 16 pads unconnected in all, mostly where a fine-pitch chip's pins have
 to be escaped (a QFP microcontroller on a 4-layer board) and on one board with a net tie.
 
 ## Our own boards
