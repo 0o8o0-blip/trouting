@@ -13,7 +13,7 @@ on:
 
 jobs:
   mac-cores:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - run: python3 tools/make_pcm.py --mac-cores-to mac-cores
@@ -114,7 +114,7 @@ jobs:
 
   macos:
     needs: package
-    runs-on: macos-14                  # Apple Silicon
+    runs-on: macos-latest              # Apple Silicon
     timeout-minutes: 90
     strategy:
       fail-fast: false
