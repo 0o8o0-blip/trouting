@@ -1,17 +1,20 @@
 """Run a function over items in worker processes, results as they come.
 
 Two ways, one interface:
-- fork (Linux, macOS): Python's multiprocessing pool needs POSIX semaphores, which
+- fork (Linux): Python's multiprocessing pool needs POSIX semaphores, which
   KiCad's snap (where the plugin runs) doesn't allow. This needs only fork and
   pipes: each worker gets the parent's memory (the board, built once) and sends
   its result back, pickled, through a pipe.
-- spawn (Windows, which has no fork): a multiprocessing pool. Each worker starts
-  a fresh Python, so it runs init(*initargs) itself to build what it needs.
+- spawn (Windows, which has no fork; macOS, where forking a process that has
+  loaded Apple's frameworks, as numpy does, can crash the child): a
+  multiprocessing pool. Each worker starts a fresh Python, so it runs
+  init(*initargs) itself to build what it needs.
 
 TROUTING_SPAWN=1 uses spawn where fork exists too (to test that path).
 """
 import os
 import pickle
+import sys
 import time
 import traceback
 
@@ -25,7 +28,7 @@ class Timeout(Exception):
 
 
 def use_fork():
-    return hasattr(os, "fork") and not os.environ.get("TROUTING_SPAWN")
+    return hasattr(os, "fork") and sys.platform != "darwin" and not os.environ.get("TROUTING_SPAWN")
 
 
 def pmap(fn, items, jobs, deadline=lambda: None, init=None, initargs=()):

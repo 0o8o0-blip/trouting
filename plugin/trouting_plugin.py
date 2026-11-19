@@ -26,7 +26,8 @@ NEEDED = ["numpy", "scipy", "shapely"]
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-import trouting_kicad  # noqa: E402  (needs ROOT on the path)
+import trouting  # noqa: E402  (needs ROOT on the path; only its __init__: no numpy)
+import trouting_kicad  # noqa: E402
 
 
 # on Windows a python.exe started from KiCad would open a console window: none
@@ -92,6 +93,7 @@ class Child:
         self.p = subprocess.Popen(cmd, cwd=ROOT, env=child_env(), stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
                                   bufsize=1, **kw)
+        trouting.keep_awake(self.p.pid)            # macOS: don't idle-sleep mid-route
         self.q = queue.Queue()
         self.lines = []
         threading.Thread(target=self._read, daemon=True).start()

@@ -1,0 +1,180 @@
+# Trouting with the real KiCad, on Windows and macOS, KiCad 9 and 10: the plugin package and the command line.
+# The package is built on Linux (MinGW cross-compiles the Windows core; the macOS cores
+# come from a Mac), then tested the way a user gets it: unzipped, packages installed
+# with KiCad's own pip, the stuck demo routed, the suggested move made, KiCad's DRC run.
+name: kicad
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+
+jobs:
+  mac-cores:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/make_pcm.py --mac-cores-to mac-cores
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-cores
+          path: mac-cores/*.dylib
+
+  package:
+    needs: mac-cores
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-cores
+          path: mac-cores
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - run: python3 tools/make_pcm.py --cores mac-cores
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pcm
+          path: dist/*.zip
+
+  windows:
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        kicad: [{version: "9.0.7", series: "9.0"}, {version: "10.0.8", series: "10.0"}]
+    name: windows (KiCad ${{ matrix.kicad.version }})
+    env:
+      PYTHONIOENCODING: utf-8          # only for this test's own printing; the plugin sets it for its child
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pcm
+          path: dist
+
+      - name: Install KiCad
+        run: |
+          $v = "${{ matrix.kicad.version }}"
+          $exe = "$env:RUNNER_TEMP\kicad.exe"
+          curl.exe -sSL -o $exe "https://github.com/KiCad/kicad-source-mirror/releases/download/$v/kicad-$v-x86_64.exe"
+          Start-Process -Wait -FilePath $exe -ArgumentList "/S", "/allusers"
+          $bin = "C:\Program Files\KiCad\${{ matrix.kicad.series }}\bin"
+          & "$bin\python.exe" -c "import sys, pcbnew; print(sys.version); print('pcbnew', pcbnew.Version())"
+
+      - name: Unpack the plugin as KiCad would
+        run: Expand-Archive (Get-ChildItem dist\*.zip).FullName "$env:RUNNER_TEMP\pcm"
+
+      - name: First run - install numpy, scipy, shapely with KiCad's pip
+        run: |
+          $py = "C:\Program Files\KiCad\${{ matrix.kicad.series }}\bin\python.exe"
+          $plug = "$env:RUNNER_TEMP\pcm\plugins"
+          & $py -c "import sys, subprocess; sys.path.insert(0, r'$plug'); import trouting_plugin as tp; py = tp.find_python(); print('router python:', py); subprocess.check_call(tp.install_cmd(py)); print('packages:', tp.deps_error(py) or 'all there'); assert tp.deps_ok(py)"
+
+      - name: Plugin pipeline on the stuck demo - route, suggest, move, route again
+        run: |
+          $bin = "C:\Program Files\KiCad\${{ matrix.kicad.series }}\bin"
+          $env:TROUTING_PLUGIN_DIR = "$env:RUNNER_TEMP\pcm\plugins"
+          $out = "$env:RUNNER_TEMP\stuck-out.kicad_pcb"
+          & "$bin\python.exe" test\t_plugin.py examples\demo\stuck.kicad_pcb $out | Tee-Object -FilePath "$env:RUNNER_TEMP\plugin.log"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $log = Get-Content -Raw "$env:RUNNER_TEMP\plugin.log"
+          if ($log -notmatch "made the move") { Write-Error "no suggested move was made"; exit 1 }
+          if ($log -notmatch "All connections routed") { Write-Error "not fully routed after the move"; exit 1 }
+          Copy-Item examples\demo\stuck.kicad_pro "$env:RUNNER_TEMP\stuck-out.kicad_pro"
+          & "$bin\kicad-cli.exe" pcb drc -o "$env:RUNNER_TEMP\drc.txt" $out
+          Get-Content "$env:RUNNER_TEMP\drc.txt" | Select-String "Found"
+          if (-not (Select-String -Quiet "Found 0 unconnected pads" "$env:RUNNER_TEMP\drc.txt")) { exit 1 }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Command line, with its own Python - finds KiCad in Program Files
+        run: |
+          python -m pip install -q -r requirements.txt
+          # a checkout has no prebuilt core: use the package's (else it needs a C compiler)
+          New-Item -ItemType Directory -Force trouting\prebuilt | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\pcm\plugins\trouting\prebuilt\*.dll" trouting\prebuilt\
+          python trouting.py examples\demo\demo.kicad_pcb -o "$env:RUNNER_TEMP\demo-out.kicad_pcb" --no-suggest | Tee-Object -FilePath "$env:RUNNER_TEMP\cli.log"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Select-String -Quiet "KiCad DRC: 0 unconnected pads" "$env:RUNNER_TEMP\cli.log")) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-kicad-${{ matrix.kicad.version }}
+          path: |
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/drc.txt
+            ${{ runner.temp }}/*-out.kicad_pcb
+
+  macos:
+    needs: package
+    runs-on: macos-14                  # Apple Silicon
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        kicad: ["9.0.7", "10.0.8"]
+    name: macos (KiCad ${{ matrix.kicad }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pcm
+          path: dist
+
+      - name: Install KiCad
+        run: |
+          v=${{ matrix.kicad }}
+          curl -sSL -o "$RUNNER_TEMP/kicad.dmg" "https://github.com/KiCad/kicad-source-mirror/releases/download/$v/kicad-unified-universal-$v.dmg"
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/dmg" "$RUNNER_TEMP/kicad.dmg" > /dev/null
+          ditto "$RUNNER_TEMP/dmg/KiCad" /Applications/KiCad
+          hdiutil detach -quiet "$RUNNER_TEMP/dmg"
+          py=/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3
+          echo "KPY=$py" >> "$GITHUB_ENV"
+          "$py" -c "import sys, pcbnew; print(sys.version); print('pcbnew', pcbnew.Version())"
+
+      - name: Unpack the plugin as KiCad would
+        run: unzip -q dist/*.zip -d "$RUNNER_TEMP/pcm"
+
+      - name: First run - install numpy, scipy, shapely with KiCad's pip
+        run: |
+          cd "$RUNNER_TEMP/pcm/plugins"
+          "$KPY" -c "import sys, subprocess; sys.path.insert(0, '.'); import trouting_plugin as tp; py = tp.find_python(); print('router python:', py); subprocess.check_call(tp.install_cmd(py)); print('packages:', tp.deps_error(py) or 'all there'); assert tp.deps_ok(py)"
+
+      - name: Plugin pipeline on the stuck demo - route, suggest, move, route again
+        run: |
+          out="$RUNNER_TEMP/stuck-out.kicad_pcb"
+          TROUTING_PLUGIN_DIR="$RUNNER_TEMP/pcm/plugins" "$KPY" test/t_plugin.py examples/demo/stuck.kicad_pcb "$out" | tee "$RUNNER_TEMP/plugin.log"
+          test "${PIPESTATUS[0]}" = 0
+          grep -q "made the move" "$RUNNER_TEMP/plugin.log" || { echo "no suggested move was made"; exit 1; }
+          grep -q "All connections routed" "$RUNNER_TEMP/plugin.log" || { echo "not fully routed after the move"; exit 1; }
+          cp examples/demo/stuck.kicad_pro "$RUNNER_TEMP/stuck-out.kicad_pro"
+          /Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli pcb drc -o "$RUNNER_TEMP/drc.txt" "$out"
+          grep Found "$RUNNER_TEMP/drc.txt"
+          grep -q "Found 0 unconnected pads" "$RUNNER_TEMP/drc.txt"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Command line, with its own Python - finds KiCad.app, builds its core with clang
+        run: |
+          python -m pip install -q -r requirements.txt
+          python trouting.py examples/demo/demo.kicad_pcb -o "$RUNNER_TEMP/demo-out.kicad_pcb" --no-suggest | tee "$RUNNER_TEMP/cli.log"
+          test "${PIPESTATUS[0]}" = 0
+          grep -q "KiCad DRC: 0 unconnected pads" "$RUNNER_TEMP/cli.log"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-kicad-${{ matrix.kicad }}
+          path: |
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/drc.txt
+            ${{ runner.temp }}/*-out.kicad_pcb

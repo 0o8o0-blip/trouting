@@ -27,7 +27,10 @@ def _build(so):
         if not exe:
             continue
         os.makedirs(os.path.dirname(so), exist_ok=True)
-        subprocess.check_call([exe, "-O3", "-march=native", "-shared", "-fPIC", "-Wall", "-o", so, SRC, "-lm"])
+        base = [exe, "-O3", "-shared", "-fPIC", "-Wall", "-o", so, SRC, "-lm"]
+        # -march=native: fastest here; some compilers (older Apple clang) don't know it
+        if subprocess.run(base[:2] + ["-march=native"] + base[2:], capture_output=True).returncode:
+            subprocess.check_call(base)
         return True
     return False
 

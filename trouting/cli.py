@@ -22,6 +22,8 @@ import sys
 import tempfile
 import time
 
+from trouting import keep_awake
+
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KICAD_SIDE = os.path.join(HERE, "trouting_kicad.py")
 
@@ -31,21 +33,35 @@ SETUPS = [(8.0, 2.5), (8.0, 1.5), (11.0, 2.5), (6.0, 2.5), (10.0, 1.5), (13.0, 2
 
 
 # ---- KiCad: its Python (snap, system or Windows install) and kicad-cli ----
-def windows_kicad():
-    """KiCad's python.exe on Windows: $KICAD_PYTHON, else the newest KiCad in Program Files."""
-    if os.environ.get("KICAD_PYTHON"):
-        return os.environ["KICAD_PYTHON"]
+def installed_kicad():
+    """KiCad's own Python and its kicad-cli, on Windows (Program Files) and macOS
+    (KiCad.app): $KICAD_PYTHON, else the newest KiCad found. (None, None): none."""
     import glob
     found = []
-    for base in {os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("ProgramW6432", ""),
-                 os.path.expandvars(r"%LOCALAPPDATA%\Programs")}:
-        if base:
-            found += glob.glob(os.path.join(base, "KiCad", "*", "bin", "python.exe"))
+    if sys.platform == "darwin":
+        for apps in ("/Applications", os.path.expanduser("~/Applications")):
+            found += glob.glob(os.path.join(apps, "KiCad*", "KiCad.app", "Contents", "Frameworks",
+                                            "Python.framework", "Versions", "*", "bin", "python3"))
+    else:
+        for base in {os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("ProgramW6432", ""),
+                     os.path.expandvars(r"%LOCALAPPDATA%\Programs")}:
+            if base:
+                found += glob.glob(os.path.join(base, "KiCad", "*", "bin", "python.exe"))
 
-    def version(p):                  # ...\KiCad\9.0\bin\python.exe -> (9, 0)
-        v = os.path.basename(os.path.dirname(os.path.dirname(p)))
-        return tuple(int(x) for x in re.findall(r"\d+", v))
-    return max(found, key=version) if found else None
+    def home(p):        # the folder named for the version: ...\KiCad\9.0 or /Applications/KiCad (9)
+        return p.split(".app" + os.sep)[0].rsplit(os.sep, 1)[0] if ".app" + os.sep in p else \
+            os.path.dirname(os.path.dirname(p))
+
+    def version(p):
+        return tuple(int(x) for x in re.findall(r"\d+", os.path.basename(home(p)))) or (0,)
+
+    exe = os.environ.get("KICAD_PYTHON") or (max(found, key=version) if found else None)
+    if not exe:
+        return None, None
+    near = os.path.join(os.path.dirname(exe), "kicad-cli.exe")                # Windows: beside python.exe
+    if ".app" + os.sep in exe:                                                 # macOS: in KiCad.app
+        near = os.path.join(exe.split(".app" + os.sep)[0] + ".app", "Contents", "MacOS", "kicad-cli")
+    return exe, near if os.path.exists(near) else shutil.which("kicad-cli")
 
 
 def kicad():
@@ -56,13 +72,14 @@ def kicad():
         work = tempfile.mkdtemp(prefix="trouting-")
         cli = shutil.which("kicad-cli") or shutil.which(os.path.join(os.path.dirname(sys.executable), "kicad-cli"))
     except subprocess.CalledProcessError:
-        if os.name == "nt":
-            exe = windows_kicad()
+        if os.name == "nt" or sys.platform == "darwin":
+            exe, cli = installed_kicad()
             if not exe:
-                sys.exit("trouting: can't find KiCad's Python (pcbnew). Install KiCad, or set KICAD_PYTHON "
-                         "to its python.exe (in KiCad's bin folder)")
-            cli = os.path.join(os.path.dirname(exe), "kicad-cli.exe")
-            return [exe], tempfile.mkdtemp(prefix="trouting-"), cli if os.path.exists(cli) else None
+                where = ("its python.exe (in KiCad's bin folder)" if os.name == "nt" else
+                         "the python3 inside KiCad.app (Contents/Frameworks/Python.framework/Versions/*/bin)")
+                sys.exit("trouting: can't find KiCad's Python (pcbnew). Install KiCad, or set KICAD_PYTHON to "
+                         + where)
+            return [exe], tempfile.mkdtemp(prefix="trouting-"), cli
         if not shutil.which("snap") or not os.path.exists("/snap/bin/kicad"):
             sys.exit("trouting: can't find KiCad's Python (pcbnew), neither installed nor as the snap")
         py = None                                   # through snap run
@@ -179,6 +196,7 @@ def route_portfolio(board_json, tries, jobs, log, png_dir=None):
 
 
 def main(argv=None):
+    keep_awake(os.getpid())
     head, _, rest = __doc__.partition("\n\n")
     ap = argparse.ArgumentParser(prog="trouting", description="Trouting: " + head.split(": ", 1)[1], epilog=rest,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
