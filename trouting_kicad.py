@@ -187,7 +187,10 @@ def dump(board, path, rip_up):
             d["tracks"].append(e)
 
     outline = pcbnew.SHAPE_POLY_SET()
-    ok = board.GetBoardPolygonOutlines(outline)
+    if "aInferOutlineIfNecessary" in (pcbnew.BOARD.GetBoardPolygonOutlines.__doc__ or ""):
+        ok = board.GetBoardPolygonOutlines(outline, False)   # KiCad 10; no outline: our own fallback below
+    else:
+        ok = board.GetBoardPolygonOutlines(outline)          # KiCad 9
     d["outline"] = polys(outline) if ok and outline.OutlineCount() else []
     d["outline_holes"] = []
     for i in range(outline.OutlineCount()):
