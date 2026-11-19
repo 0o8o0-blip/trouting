@@ -53,14 +53,17 @@ on Linux `tools/install_plugin.sh` links the plugin into KiCad instead, for
 development.
 
 The first time you click it, it asks to install numpy, scipy and shapely into
-its own folder with KiCad's pip: a 55 MB download. The router runs in a
+its own folder: a 55 MB download, with KiCad's pip (KiCad's AppImage has none:
+then the plugin fetches the same packages from PyPI itself, each checked
+against PyPI's SHA-256). The router runs in a
 process of its own, so the editor stays responsive and you can cancel.
 
 It works with KiCad 9 and 10 on Linux, 64-bit Windows and macOS (Apple
-Silicon and Intel). On Linux it is tested with the KiCad 9 snap. On Windows and
-on an Apple Silicon Mac, every change is tested on GitHub Actions with KiCad 9
-and 10 from their installers: the package install and the whole routing run,
-up to a clean DRC. The Intel Mac build is made but not tested.
+Silicon and Intel). On Linux it is tested with the KiCad 9 snap and KiCad's
+AppImage. On Windows, on an Apple Silicon Mac and with the AppImage on Linux,
+every change is tested on GitHub Actions with KiCad 9 and 10 from their
+installers: the package install and the whole routing run, up to a clean DRC.
+The Intel Mac build is made but not tested.
 
 It routes 12 setups at once and keeps the best, so it is quicker the more cores
 you have: the stuck demo below, suggestions included, takes about 7 minutes on
