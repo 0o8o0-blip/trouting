@@ -67,6 +67,24 @@ def add_copper_drawing(board, g, cu, d, ref):
     d["copper_shapes"].append(e)
 
 
+def add_mask_opening(g, d, ref=None):
+    """An opening in the solder mask that no copper pad makes (a mask-only pad or a
+    drawn shape): copper of two nets in it is a solder mask bridge."""
+    for ml, side in ((pcbnew.F_Mask, "F"), (pcbnew.B_Mask, "B")):
+        if not g.IsOnLayer(ml):
+            continue
+        ps = pcbnew.SHAPE_POLY_SET()
+        try:
+            g.TransformShapeToPolygon(ps, ml, 0, EPS, pcbnew.ERROR_OUTSIDE)
+        except Exception:
+            continue
+        if ps.OutlineCount():
+            e = {"side": side, "polys": polys(ps), "holes": holes(ps)}
+            if ref is not None:
+                e["ref"] = ref                  # it moves with its footprint
+            d["mask_openings"].append(e)
+
+
 def copper_layers(board):
     return [l for l in board.GetEnabledLayers().CuStack()]
 
@@ -121,7 +139,7 @@ def dump(board, path, rip_up):
         },
         "nets": net_rules(board),
         "pads": [], "holes": [], "keepouts": [], "pours": [],
-        "tracks": [], "vias": [], "footprints": [], "copper_shapes": [],
+        "tracks": [], "vias": [], "footprints": [], "copper_shapes": [], "mask_openings": [],
     }
 
     for f in board.GetFootprints():
@@ -157,6 +175,7 @@ def dump(board, path, rip_up):
                     p.TransformShapeToPolygon(ps, l, 0, EPS, pcbnew.ERROR_INSIDE)
                     e["shapes"][n] = polys(ps)
             if not e["shapes"]:
+                add_mask_opening(p, d, ref)     # a mask-only pad
                 continue
             if npth:
                 # KiCad's DRC holds an NPTH pad's copper ring against tracks on every layer
@@ -173,8 +192,12 @@ def dump(board, path, rip_up):
         fields = list(f.GetFields()) if hasattr(f, "GetFields") else [f.Reference(), f.Value()]
         for g in list(f.GraphicalItems()) + fields:
             add_copper_drawing(board, g, cu, d, ref)
+            if isinstance(g, pcbnew.PCB_SHAPE):
+                add_mask_opening(g, d, ref)
     for g in board.GetDrawings():
         add_copper_drawing(board, g, cu, d, None)
+        if isinstance(g, pcbnew.PCB_SHAPE):
+            add_mask_opening(g, d)
 
     zones = [(z, None) for z in board.Zones()]
     for f in board.GetFootprints():

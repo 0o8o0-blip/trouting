@@ -55,7 +55,7 @@ def moved(d, ref, rot=0, dx=0.0, dy=0.0):
     fp = next(f for f in d["footprints"] if f["ref"] == ref)
     f = _mover(fp["at"], rot, dx, dy)
     e = dict(d)                                         # only the touched lists are copied
-    for key in ("footprints", "pads", "holes", "copper_shapes", "keepouts", "pours"):
+    for key in ("footprints", "pads", "holes", "copper_shapes", "keepouts", "pours", "mask_openings"):
         e[key] = list(d.get(key, []))
     for i, x in enumerate(e["footprints"]):
         if x["ref"] == ref:
@@ -77,7 +77,8 @@ def moved(d, ref, rot=0, dx=0.0, dy=0.0):
     for i, x in enumerate(e["holes"]):
         if x.get("ref") == ref:
             e["holes"][i] = dict(x, at=f(x["at"]))
-    for key, poly_key in (("copper_shapes", "polys"), ("keepouts", "polys"), ("pours", "polys")):
+    for key, poly_key in (("copper_shapes", "polys"), ("keepouts", "polys"), ("pours", "polys"),
+                          ("mask_openings", "polys")):
         for i, x in enumerate(e[key]):
             if x.get("ref") == ref:
                 e[key][i] = dict(x, **{poly_key: _rings(x[poly_key], f)})

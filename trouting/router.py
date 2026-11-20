@@ -18,7 +18,7 @@ import numpy as np
 import shapely
 from scipy import ndimage
 
-from .board import MARGIN
+from .board import MARGIN, shape_of
 from .core import Grid, Path, thin_of
 
 
@@ -86,6 +86,7 @@ class Router:
         # a net that would narrow only to get out from between fine-pitch pins: only
         # if a pad of it is boxed in for the full width, and only near those pads
         self.neck_cells = {}
+        self._pads = {}           # (net, layer): its pads' shapes and centres
         for n, (x, near) in enumerate(necks):
             if x and near and not (len(b.terminals.get(n, [])) >= 2 or n in b.planes):
                 self.neck_w[n] = None            # nothing to route
@@ -1254,8 +1255,9 @@ class Router:
             self.o.log("stitched %d pour islands to their plane" % self.stitches)
 
     # ---- output ----
-    def segments(self, n):
-        """Tracks (merged straight runs) and vias of a routed net, in mm."""
+    def segments(self, n, cands=None):
+        """Tracks (merged straight runs) and vias of a routed net, in mm. With
+        cands: adds the pieces that would carry its ends on to pad centres."""
         b = self.b
         r = b.net_rule[n]
         tracks, vias = [], []
@@ -1266,6 +1268,7 @@ class Router:
             ends.add(int(path[0]))
             ends.add(int(path[-1]))
         for path in self.paths.get(n, []):
+            first = len(tracks)
             pts = [b.node_xy(v) for v in path]
             th = thin_of(path)
             # a step is narrow if either end is (a width change sits on a wide node)
@@ -1293,18 +1296,147 @@ class Router:
                                "b": [round(b.cx(xj), 4), round(b.cy(yj), 4)],
                                "w": self.neck_w[n] if nar else r["width"]})
                 i = j
+            # the search stops at the pad's edge: each end may go on to the pad's centre
+            # (result() checks those pieces' clearance)
+            if cands is not None and len(tracks) > first:
+                for t, end, other in ((tracks[first], "a", "b"), (tracks[-1], "b", "a")):
+                    at = self.pad_centre(n, t["layer"], t[end])
+                    if at is not None:
+                        ways = [w for w in [self.into_pad(t[other], t[end], at)] if w] + \
+                            self.octilinear(t[end], at) + [[t[end], at]]
+                        uniq = []
+                        for w in ways:
+                            if w not in uniq:
+                                uniq.append(w)
+                        cands.append((n, [[dict(t, a=p, b=q) for p, q in zip(w, w[1:])] for w in uniq]))
         out_v = [{"net": b.net_names[n], "at": [round(b.cx(x), 4), round(b.cy(y), 4)],
                   "d": r["via_d"], "drill": r["via_drill"], "layers": [b.layers[0], b.layers[-1]]}
                  for x, y in sorted(set(vias))]
         return tracks, out_v
 
+    def pad_centre(self, n, layer, e):
+        """The centre of the pad of net n that a track end e lies in, if that is
+        somewhere else in the pad; else None."""
+        pads = self._pads.get((n, layer))
+        if pads is None:
+            l = self.b.li[layer]
+            pads = self._pads[(n, layer)] = [
+                (it["geoms"][l], it["at"]) for t in self.b.terminals.get(n, [])
+                for it in t["items"] if it["kind"] == "pad" and l in it["geoms"]]
+        pe = shapely.Point(e)
+        for g, at in pads:
+            if g.buffer(1e-6).contains(pe):
+                c = [round(at[0], 4), round(at[1], 4)]
+                if math.dist(e, c) >= 1e-3 and g.contains(shapely.Point(c)):
+                    return c
+                return None
+        return None
+
+    @staticmethod
+    def into_pad(prev, e, c):
+        """The way from track end e (reached from prev) on to the pad centre c, as a
+        designer draws it: straight on, then 45 degrees to the centre (or, where the
+        centre is only off the line by the grid's rounding, a jog too small to see)."""
+        ux, uy = e[0] - prev[0], e[1] - prev[1]
+        L = math.hypot(ux, uy)
+        if L < 1e-9:
+            return None
+        ux, uy = ux / L, uy / L
+        dx, dy = c[0] - e[0], c[1] - e[1]
+        s, h = dx * ux + dy * uy, dy * ux - dx * uy        # along the track, and off it
+        r4 = lambda p: [round(p[0], 4), round(p[1], 4)]
+        if s <= 1e-6:
+            return None                                    # the centre is behind: no straight on
+        if abs(h) <= 0.06:
+            q = r4((e[0] + s * ux, e[1] + s * uy))
+        elif s > abs(h):
+            q = r4((e[0] + (s - abs(h)) * ux, e[1] + (s - abs(h)) * uy))
+        else:
+            return None
+        return [e, q, c] if math.dist(q, c) > 1e-4 and math.dist(q, e) > 1e-4 else [e, c]
+
+    @staticmethod
+    def octilinear(e, c):
+        """The two ways from e to c of one straight and one 45-degree leg."""
+        dx, dy = c[0] - e[0], c[1] - e[1]
+        ax, ay = abs(dx), abs(dy)
+        if min(ax, ay) < 1e-4 or abs(ax - ay) < 1e-4:
+            return []                              # one leg does it: the straight way
+        sx, sy = math.copysign(1, dx), math.copysign(1, dy)
+        m = min(ax, ay)
+        diag = (e[0] + sx * m, e[1] + sy * m)      # diagonal first
+        strt = (c[0] - sx * m, c[1] - sy * m)      # straight first
+        r4 = lambda p: [round(p[0], 4), round(p[1], 4)]
+        return [[e, r4(strt), c], [e, r4(diag), c]]
+
+    def to_centres(self, tracks, vias, cands):
+        """The pieces from track ends on to their pads' centres that keep every
+        clearance: clear of other nets' copper, holes, keepouts and the board edge."""
+        b = self.b
+        ok = []
+        if not cands:
+            return ok
+        obst = {}                          # layer: [(shape, net, clearance, fixed)]
+        for l, g, m, c, fixed in b.items:
+            obst.setdefault(l, []).append((g, m, c, fixed))
+        for t in tracks:
+            l = b.li[t["layer"]]
+            obst.setdefault(l, []).append((shapely.LineString([t["a"], t["b"]]).buffer(t["w"] / 2),
+                                           b.ni[t["net"]], b.net_clr(b.ni[t["net"]]), False))
+        for v in vias:
+            g = shapely.Point(v["at"]).buffer(v["d"] / 2)
+            for l in range(b.L):
+                obst.setdefault(l, []).append((g, b.ni[v["net"]], b.net_clr(b.ni[v["net"]]), False))
+        trees = {l: shapely.STRtree([o[0] for o in os_]) for l, os_ in obst.items()}
+        # no track at all in a keepout, not even inside a pad that reaches into one
+        keep = {}
+        for k in b.d["keepouts"]:
+            if k["tracks"]:
+                for ln in k["layers"]:
+                    if ln in b.li:
+                        keep.setdefault(b.li[ln], []).append(shape_of(k))
+        # mask openings no copper pad makes: a track in one may bridge it to another net
+        mask = {}
+        for m in b.d.get("mask_openings", []):
+            ln = b.layers[0] if m["side"] == "F" else b.layers[-1]
+            mask.setdefault(b.li[ln], []).append(shape_of(m))
+        reach = max([o[2] for os_ in obst.values() for o in os_] + [b.net_clr(c[0]) for c in cands]) + 0.05
+        edge = b.outline.boundary
+        min_track = b.d["rules"].get("min_track") or 0.0
+        def fits(n, l, piece):
+            # all of the piece, also inside its own pad: KiCad checks a track's clearance
+            # there too, and fine-pitch pads can be closer to each other than that
+            if any(piece.intersects(g) for g in keep.get(l, []) + mask.get(l, [])):
+                return False
+            if not b.outline.contains(piece) or piece.distance(edge) < b.edge_clr + 0.005:
+                return False
+            cn = b.net_clr(n)
+            near = [obst[l][i] for i in trees[l].query(piece.buffer(reach))] if l in trees else []
+            near += [(g, m, b.net_clr(m), False) for m, ll, g in ok if ll == l]
+            return not any(m != n and piece.distance(g) < (c if fixed else max(c, cn)) + 0.005
+                           for g, m, c, fixed in near)
+
+        for n, ways in cands:
+            t = ways[0][0]
+            l = b.li[t["layer"]]
+            if t["w"] < min_track - 1e-6:          # under the board's own minimum: no more of it
+                continue
+            for ts in ways:                        # the designer's way, else straight there
+                piece = shapely.LineString([t["a"]] + [x["b"] for x in ts]).buffer(t["w"] / 2)
+                if fits(n, l, piece):
+                    ok.append((n, l, piece))
+                    tracks += ts
+                    break
+        return ok
+
     def result(self):
-        tracks, vias = [], []
+        tracks, vias, cands = [], [], []
         for n in self.nets:
             if n in self.stamped:
-                t, v = self.segments(n)
+                t, v = self.segments(n, cands)
                 tracks += t
                 vias += v
+        self.to_centres(tracks, vias, cands)
         unrouted = []
         for n in self.nets:
             for t in self.failed.get(n, []):
