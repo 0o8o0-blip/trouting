@@ -46,7 +46,15 @@ class Board:
         # nets: index, rules
         self.net_names = sorted(d["nets"])
         self.ni = {n: i for i, n in enumerate(self.net_names)}
-        self.net_rule = [d["nets"][n] for n in self.net_names]
+        # (never under the board's own minimums: a net class narrower than those is
+        # all DRC errors, and KiCad's router won't go under them either)
+        # (copper narrower than the minimum connection width is flagged too: it counts
+        # as the minimum track from here on)
+        rules["min_track"] = max(rules.get("min_track") or 0.0, rules.get("min_connection") or 0.0)
+        lo = {"width": rules["min_track"], "via_d": rules.get("min_via_d") or 0.0,
+              "via_drill": rules.get("min_via_drill") or 0.0, "clearance": rules.get("min_clearance") or 0.0}
+        self.net_rule = [dict(d["nets"][n], **{k: max(d["nets"][n][k], v) for k, v in lo.items()
+                                                if k in d["nets"][n]}) for n in self.net_names]
         clrs = [r["clearance"] for r in self.net_rule] or [0.2]
         self.c_ref = min(clrs)
         self.clrs = sorted(set(clrs))                 # the clearance classes
@@ -141,8 +149,9 @@ class Board:
                 self.items.append((l, g, n, self.net_clr(n), False))
         for h in d["holes"]:
             g = Point(h["at"]).buffer(h["r"])
+            c = max(self.hole_clr, h.get("clearance") or 0.0)
             for l in range(self.L):
-                self.items.append((l, g, NO_NET, self.hole_clr, True))
+                self.items.append((l, g, NO_NET, c, True))
         for k in d["keepouts"]:
             if k["tracks"]:
                 g = shape_of(k)
@@ -315,6 +324,16 @@ class Board:
                 g = Point(v["at"]).buffer(v["d"] / 2)
                 per.setdefault(n, []).append({"kind": "via", "name": "via", "at": v["at"],
                                               "geoms": {l: g for l in range(self.L)}})
+        # copper drawn with a net (a shape, copper text): KiCad wants it joined like a pad
+        for c in d["copper_shapes"]:
+            if c["net"] in self.ni and c["layer"] in self.li:
+                g = shape_of(c)
+                if g.is_empty:
+                    continue
+                at = [g.centroid.x, g.centroid.y]
+                per.setdefault(self.ni[c["net"]], []).append(
+                    {"kind": "shape", "name": "shape at (%.2f, %.2f)" % tuple(at), "at": at,
+                     "geoms": {self.li[c["layer"]]: g}})
         self.terminals = {}
         for n, items in per.items():
             parent = list(range(len(items)))
@@ -356,9 +375,13 @@ class Board:
                 tip = Point(e).buffer(it["w"] / 2 + 0.01)
                 if not any(o is not it and l in o["geoms"] and o["geoms"][l].intersects(tip) for o in items):
                     entry.append(self.cells_in(tip, l))
+        # (only cells of the group itself: a path ending outside it wouldn't join it, and
+        # the repair would look for that join forever)
+        entry = np.intersect1d(cat(entry), cat(cells)).astype(np.int32) if entry else np.zeros(0, np.int32)
         t = {"net": n, "items": items, "cells": cat(cells), "own": cat(own), "novia": cat(novia),
-             "entry": cat(entry) if entry and len(cat(entry)) else cat(cells),
-             "names": [it["name"] for it in items if it["kind"] == "pad"],
+             "entry": entry if len(entry) else cat(cells),
+             "names": [it["name"] for it in items if it["kind"] == "pad"] or
+                      [it["name"] for it in items if it["kind"] == "shape"],
              "at": np.mean([it["at"] for it in items], axis=0)}
         if n in self.planes:
             pl, region = self.planes[n]

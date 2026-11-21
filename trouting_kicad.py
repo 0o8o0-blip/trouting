@@ -45,6 +45,18 @@ def holes(polyset):
             for i in range(polyset.OutlineCount())]
 
 
+def local_clearance(item):
+    """A pad's or footprint's clearance override in mm (None: none set). KiCad 9
+    gives an optional, older versions an int (0: none)."""
+    try:
+        c = item.GetLocalClearance()
+    except Exception:
+        return None
+    if hasattr(c, "has_value"):
+        c = c.value() if c.has_value() else 0
+    return mm(c) if c else None
+
+
 def add_copper_drawing(board, g, cu, d, ref):
     """A drawn item on a copper layer as copper: a shape, or text (copper text is copper
     too; a track through it is a short). Hidden text isn't there."""
@@ -131,6 +143,7 @@ def dump(board, path, rip_up):
         "rules": {
             "min_clearance": mm(ds.m_MinClearance),
             "min_track": mm(ds.m_TrackMinWidth),
+            "min_connection": mm(getattr(ds, "m_MinConn", 0)),
             "min_via_d": mm(ds.m_ViasMinSize),
             "min_via_drill": mm(ds.m_MinThroughDrill),
             "hole_clearance": mm(ds.m_HoleClearance),
@@ -155,7 +168,11 @@ def dump(board, path, rip_up):
         for p in f.Pads():
             if p.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH:
                 dr = p.GetDrillSize()
-                d["holes"].append({"ref": ref, "at": pt(p.GetPosition()), "r": mm(max(dr.x, dr.y)) / 2})
+                h = {"ref": ref, "at": pt(p.GetPosition()), "r": mm(max(dr.x, dr.y)) / 2}
+                c = local_clearance(p) or local_clearance(f)
+                if c:    # its own clearance (a mounting hole's keep-away): the fill keeps it
+                    h["clearance"] = c
+                d["holes"].append(h)
                 # an NPTH pad bigger than its hole has a ring of copper (of no net), which
                 # DRC keeps the pad's clearance from: it goes on as a net-less pad
             npth = p.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH

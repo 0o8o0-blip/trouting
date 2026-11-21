@@ -316,7 +316,8 @@ class Router:
                 for u, ext in spokes:
                     land = ctr + u * (ext + gap * res + 1.5 * res)
                     x, y = b.to_cell(*land)
-                    if not (0 <= x < b.W and 0 <= y < b.H and mask[y, x]):
+                    if not (0 <= x < b.W and 0 <= y < b.H and mask[y, x]) or \
+                            not self.spoke_inside(n, l, ctr, u, ext, gap):
                         cors.append(None)           # never any pour to land on
                         continue
                     a0, a1 = ext, ext + gap * res + zw + room
@@ -855,6 +856,8 @@ class Router:
                 if not np.allclose(pc, ctr):
                     continue
                 for u, ext in spokes:
+                    if not self.spoke_inside(t["net"], pl, ctr, u, ext, gap):
+                        continue
                     v = np.array([-u[1], u[0]])
                     ok = True
                     for tt in np.linspace(-sw / 2, sw / 2, 5):
@@ -865,6 +868,18 @@ class Router:
                     if ok:
                         return True
         return False
+
+    def spoke_inside(self, n, l, ctr, u, ext, gap):
+        """Does the spoke's way across the gap lie in the pour's area? KiCad clips
+        the spokes to the zone outline, so a pad just outside it (closer than the
+        thermal gap) gets spokes that start on the pour and never reach the pad."""
+        b = self.b
+        mask = self.pour_mask(n, l)
+        for dist in np.arange(ext + b.res / 2, ext + gap * b.res, b.res):
+            x, y = b.to_cell(*(ctr + u * dist))
+            if not (0 <= x < b.W and 0 <= y < b.H and mask[y, x]):
+                return False
+        return True
 
     def joined_to_plane(self, n, paths, island):
         """Nodes known joined to the plane: the island, and the stubs that land on it
@@ -1089,10 +1104,18 @@ class Router:
             self.paths[n], self.failed[n] = self.route_net(n, pres, keep=True)
             return
         self.failed[n] = []
+        before = None
         while True:
             comps = self.components(n)
             if len(comps) < 2:
                 return
+            if before is not None and len(comps) >= before:
+                # the last path joined nothing (it shouldn't happen): don't search forever
+                self.paths[n].pop()
+                for g in comps[1:]:
+                    self.failed[n].append({"names": sum((self.b.terminals[n][i]["names"] for i in g[0]), [])})
+                return
+            before = len(comps)
             comps.sort(key=lambda g: -len(g[0]))
             main = self.group_nodes(n, comps[0])
             for g in comps[1:]:
