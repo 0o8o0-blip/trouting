@@ -1,5 +1,5 @@
 """Trouting: an autorouter for KiCad boards."""
-__version__ = "0.4.4"
+__version__ = "0.4.5"
 
 
 def keep_awake(pid):

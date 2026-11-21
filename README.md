@@ -183,7 +183,7 @@ connect every board; the difference is DRC errors, and Trouting uses fewer vias 
 per D3-B board, 56 against 85 per D3-C board). The D3 boards are small to medium (D3-A: 6 to 31
 pads); how it was run, the cross-checks and the caveats are in [docs/benchmarks.md](docs/benchmarks.md).
 
-**31 public, hand-routed boards** from GitHub (53 to 667 pads, six of them 4-layer): 25 end with
+**31 public, hand-routed boards** from GitHub (53 to 667 pads, six of them 4-layer): 28 end with
 every pad connected. **Ten boards of our own** (2-layer, 3 to 64 nets): all ten.
 
 ## Limitations
