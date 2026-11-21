@@ -68,9 +68,9 @@ The Intel Mac build is made but not tested.
 
 It routes 12 setups at once and keeps the best, so it is quicker the more cores
 you have: the stuck demo below, suggestions included, takes about 7 minutes on
-12 cores and over 20 on 4. It takes as long as it needs; `--max-minutes M`
-stops each setup after M minutes instead, keeping its best try and listing the
-nets it couldn't route.
+12 cores and over 20 on 4. The routing gets 20 minutes: when they're up, each
+setup keeps its best try, and the nets it couldn't route are listed.
+`--max-minutes M` gives it M minutes instead (0: as long as it needs).
 
 ## From the command line
 
@@ -171,14 +171,17 @@ This takes about as long again as the routing. `--no-suggest` skips it.
 on real open-source KiCad boards, scored by its own pipeline with KiCad's DRC. Clean pass: the
 share of boards fully connected *and* with zero DRC errors.
 
-| Set | Boards | Trouting | Freerouting | KiCadRoutingTools | Best RL agent |
+| Set | Boards | Trouting | KiCadRoutingTools 0.24.1 | Freerouting | Best RL agent |
 |---|---|---|---|---|---|
-| D3-A | 99 | **1.00** | 0.80 | 0.74 | 0.94 |
-| D3-B | 10 | **1.00** | 0.78 | 0.20 | 0.45 |
-| D3-C | 10 | **1.00** | – | – | – |
+| D3-A | 99 | **1.00** | 0.92 | 0.80 | 0.94 |
+| D3-B | 10 | **1.00** | 0.50 | 0.78 | 0.45 |
+| D3-C | 10 | **1.00** | 0.50 | – | – |
 
-The others' numbers are the paper's. The D3 boards are small to medium (D3-A: 6 to 31 pads);
-how it was run, the cross-checks and the caveats are in [docs/benchmarks.md](docs/benchmarks.md).
+KiCadRoutingTools is its current version (November 2026), run here with PCBWorld's own setup for
+it; Freerouting's and the RL agent's numbers are the paper's. Both Trouting and KiCadRoutingTools
+connect every board; the difference is DRC errors, and Trouting uses fewer vias (12.6 against 17.9
+per D3-B board, 56 against 85 per D3-C board). The D3 boards are small to medium (D3-A: 6 to 31
+pads); how it was run, the cross-checks and the caveats are in [docs/benchmarks.md](docs/benchmarks.md).
 
 **31 public, hand-routed boards** from GitHub (53 to 667 pads, six of them 4-layer): 25 end with
 every pad connected. **Ten boards of our own** (2-layer, 3 to 64 nets): all ten.

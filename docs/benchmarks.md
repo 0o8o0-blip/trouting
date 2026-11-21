@@ -26,6 +26,24 @@ Routability was 1.00 on all three sets: every connection of every board routed. 
 routers' numbers are the paper's Table 3 (Freerouting and PPO best of five tries, averaged over
 four seeds; the paper reports no D3-C numbers).
 
+**KiCadRoutingTools today.** The paper used a KiCadRoutingTools from April 2026 (commit
+561f158). Its current version, 0.24.1 (commit ac2d484, November 2026), is much better, so it was
+run again here through PCBWorld's own KRT runner (`eval/rollout/rule_based.py --baseline krt`, the
+paper's arguments, with `KRT_ROOT` pointing at the new checkout), next to Trouting with the
+changes since 0.4.4, all scored the same way:
+
+| Set | Trouting CP | KRT 0.24.1 CP | Trouting Rout. | KRT 0.24.1 Rout. | Trouting vias | KRT 0.24.1 vias | KRT 0.24.1 DRC errors per board |
+|---|---|---|---|---|---|---|---|
+| D3-A | **1.00** | 0.92 | 1.00 | 1.00 | 2.2 | 4.1 | 1.2 |
+| D3-B | **1.00** | 0.50 | 1.00 | 1.00 | 12.6 | 17.9 | 5.4 |
+| D3-C | **1.00** | 0.50 | 1.00 | 1.00 | 55.9 | 84.8 | 21.0 |
+
+How KRT is run matters a lot: PCBWorld's runner hands its `route.py` each board's clearance, track
+and via sizes and tuned search limits. KRT's one-step `autoroute.py` on the same boards, with the
+board's rules (`--board-rules --keep-placement`), got a clean pass on 0.37 / 0.00 / 0.00 of them,
+and with its defaults (which route to a fab's minimums rather than the board's rules) on none.
+KRT also does things this benchmark doesn't measure, such as BGA fanout and length matching.
+
 **Checking the scoring.** Two cross-checks, scored with the same pipeline and settings:
 
 | | D3-A CP | D3-A Rout. | D3-B CP | D3-B Rout. |
