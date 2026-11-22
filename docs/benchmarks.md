@@ -76,17 +76,41 @@ chips, where it can still fail (below).
 
 To run it yourself: [tools/pcbworld/](../tools/pcbworld/README.md).
 
+## Boards with 4 or more layers
+
+The D3 sets have only one board with more than two layers, so a second run took every board with
+4 or more copper layers from the whole collection the D3 sets are drawn from (PCBench, converted
+by PCBWorld, pours removed as in D3): 40 boards. KiCadRoutingTools reads a board through a
+Specctra file that PCBWorld's conversion couldn't make for 3 of them, so the comparison is on the
+other 37: 36 with 4 layers and one with 8 (1585 pads). Each router got one try with a 3-hour cap;
+KiCadRoutingTools ran through PCBWorld's own runner as above, and all were scored with PCBWorld's
+pipeline and the paper's settings.
+
+| | Clean pass | Fully connected |
+|---|---|---|
+| Trouting | **34 of 37** | 34 |
+| KiCadRoutingTools 0.24.1 | 8 of 37 | 27 |
+| The boards' original human routing | 36 of 37 | 36 |
+
+Half the boards took each router under a minute. The 8-layer board came out fully connected and
+clean in 70 minutes; KiCadRoutingTools took 95 minutes on it and left 57 connections unrouted.
+Trouting's misses: two versions of one very dense design (18 and 20 pads left; KiCadRoutingTools
+left about 170 on each) and one pad on a third board, all pins that have to get out from under a
+fine-pitch chip. Of the 3 boards without a comparison, Trouting connected one fully, left 5 pads
+on another, and on the third (1151 pads, two fine-pitch chips) still had about 30 connections
+unrouted when the 3 hours were up.
+
 ## 31 public, hand-routed boards
 
 A second set: 31 open-source KiCad boards from GitHub that people routed by hand, 25 two-layer
 and 6 four-layer, with 53 to 667 pads (keyboards, USB hubs, ESP32/RP2040/STM32 boards, audio,
 power). Each is routed from scratch with its own rules, and checked with KiCad's DRC.
 
-28 of the 31 end with every pad connected, 21 of them with no DRC error the board didn't have
-before (scored with KiCad 9's DRC, zones refilled, errors only). The other 3 leave 9 pads
-unconnected in all: 6 where a fine-pitch chip's pins have to be escaped (a QFN microcontroller
-on a 4-layer board, which gets the 20 minutes and then gives its best try), 2 on a net tie and 1
-on a crowded 2-layer board.
+28 of the 31 end with every pad connected, 20 of them with no DRC error the board didn't have
+before (scored with KiCad 9's DRC, zones refilled, errors only). The other 3 leave 10 pads
+unconnected in all: 7 where a fine-pitch chip's pins have to be escaped (a QFN microcontroller
+on a 4-layer board, which routes for about an hour and a half until it stops getting better and
+then gives its best try), 2 on a net tie and 1 on a crowded 2-layer board.
 
 ## Our own boards
 

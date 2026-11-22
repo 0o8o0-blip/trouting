@@ -68,9 +68,9 @@ The Intel Mac build is made but not tested.
 
 It routes 12 setups at once and keeps the best, so it is quicker the more cores
 you have: the stuck demo below, suggestions included, takes about 7 minutes on
-12 cores and over 20 on 4. The routing gets 20 minutes: when they're up, each
-setup keeps its best try, and the nets it couldn't route are listed.
-`--max-minutes M` gives it M minutes instead (0: as long as it needs).
+12 cores and over 20 on 4. It takes as long as it needs; `--max-minutes M`
+stops it after M minutes, when each setup keeps its best try and the nets it
+couldn't route are listed.
 
 ## From the command line
 
@@ -183,6 +183,15 @@ connect every board; the difference is DRC errors, and Trouting uses fewer vias 
 per D3-B board, 56 against 85 per D3-C board). The D3 boards are small to medium (D3-A: 6 to 31
 pads); how it was run, the cross-checks and the caveats are in [docs/benchmarks.md](docs/benchmarks.md).
 
+**37 boards with 4 or more layers** from the collection PCBWorld's boards come from (36 with 4
+layers, one with 8 layers and 1585 pads), scored the same way. Clean pass:
+
+| Trouting | KiCadRoutingTools 0.24.1 | The original hand routing |
+|---|---|---|
+| **34 of 37** | 8 of 37 | 36 of 37 |
+
+Trouting's three misses are pins it can't get out from under dense chips.
+
 **31 public, hand-routed boards** from GitHub (53 to 667 pads, six of them 4-layer): 28 end with
 every pad connected. **Ten boards of our own** (2-layer, 3 to 64 nets): all ten.
 
@@ -192,7 +201,8 @@ What it doesn't do yet:
 
 - **Escaping fine-pitch chips** (QFP, BGA) on dense boards: where many pins have to get out
   from under one chip, it can leave a few of them unrouted.
-- **More than two layers** is tested on a few boards only, and inner layers mostly as pours.
+- **Big, dense boards can take hours.** A 4-layer board with 1151 pads and two fine-pitch chips
+  still had about 30 connections unrouted after 3 hours.
 - **Pours on nets other than the plane net** (a +3V3 pour, say) aren't
   modelled, so they can be left with isolated copper.
 - **Differential pairs and length matching** are not supported.

@@ -128,7 +128,7 @@ def drc(cli, pcb, work, name):
 # ---- routing, several setups at once ----
 _BOARD = None
 _PNG_DIR = None                                  # set when --png is asked for: each setup draws its result here
-DEFAULT_MINUTES = 20                             # the routing's time, all setups together (None: no limit)
+DEFAULT_MINUTES = None                           # the routing's time, all setups together (None: no limit)
 _UNTIL = None                                    # when the routing has to be done (time.time()), or None
 
 
@@ -159,7 +159,8 @@ def _route(setup):
         render(r, png)
     return {"setup": setup, "out": out, "unrouted": n_unrouted, "vias": len(out["vias"]), "png": png,
             "length": round(length, 1), "hot": hot, "hot_all": hot_all, "rounds": len(r.history), "secs": round(time.time() - t, 1),
-            "stitches": getattr(r, "stitches", 0), "out_of_time": r.out_of_time}
+            "stitches": getattr(r, "stitches", 0), "out_of_time": r.out_of_time,
+            "stalled": getattr(r, "stalled", False), "history": r.history}
 
 
 def _init_route(board_json, png_dir, until=None):
@@ -197,7 +198,8 @@ def route_portfolio(board_json, tries, jobs, log, png_dir=None, minutes="default
                         init=_init_route, initargs=(board_json, png_dir, until)):
             log("  setup via %4.1f, plane %.1f: %2d unrouted, %3d vias, %6.0f mm  (%d rounds, %.0fs%s)"
                 % (res["setup"] + (res["unrouted"], res["vias"], res["length"], res["rounds"], res["secs"],
-                                   ", out of time" if res["out_of_time"] else "")))
+                                   ", out of time" if res["out_of_time"] else
+                                   ", no calmer round" if res.get("stalled") else "")))
             results.append(res)
             # one setup routed everything: the others get half as long again to do it with
             # fewer vias, then the best so far is taken
@@ -226,7 +228,7 @@ def main(argv=None):
                     help="setups to run at the same time (default: one per core, %(default)s here)")
     ap.add_argument("--max-minutes", type=float, metavar="M",
                     help="time the routing gets, all setups together: when it's up, each setup "
-                         "keeps its best try (default %d; 0: no limit)" % DEFAULT_MINUTES)
+                         "keeps its best try (default: no limit)")
     ap.add_argument("--no-suggest", action="store_true",
                     help="if the board doesn't route fully, don't look for parts to move or rotate")
     ap.add_argument("--png", metavar="FILE",
