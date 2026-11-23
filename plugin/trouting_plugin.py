@@ -107,9 +107,7 @@ class Child:
     def __init__(self, cmd):
         kw = {"start_new_session": True} if os.name == "posix" else \
              {"creationflags": NO_WINDOW["creationflags"] | subprocess.CREATE_NEW_PROCESS_GROUP}
-        # stdin: a pipe nobody writes to. It closes when KiCad exits, however that happens
-        # (a crash too), which tells the router to stop (trouting.job --watch-stdin)
-        self.p = subprocess.Popen(cmd, cwd=ROOT, env=child_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        self.p = subprocess.Popen(cmd, cwd=ROOT, env=child_env(), stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
                                   bufsize=1, **kw)
         trouting.keep_awake(self.p.pid)            # macOS: don't idle-sleep mid-route
@@ -164,7 +162,7 @@ def route_board(board, py, keep_tracks=False, suggest=True, tries=12, poll=lambd
         trouting_kicad.dump(board, bj, rip_up=not keep_tracks)
         job = "import runpy; runpy.run_module('trouting.job', run_name='__main__', alter_sys=True)"
         cmd = [py, "-u", "-c", boot(job), bj, rj, "--tries", str(tries), "--jobs", os.environ.get("TROUTING_JOBS") or str(os.cpu_count() or 4),
-               "--watch-stdin"]
+               "--parent-pid", str(os.getpid())]           # this is KiCad's process: stop when it's gone
         if not suggest:
             cmd.append("--no-suggest")
         ch = Child(cmd)

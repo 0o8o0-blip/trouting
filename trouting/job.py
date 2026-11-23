@@ -15,20 +15,28 @@ import time
 from . import cli
 
 
-def watch_stdin():
-    """Exit when stdin reaches its end: the plugin that started this process holds the
-    other end, and the system closes it when KiCad exits, crashed or not. The workers
-    watch this process in turn (parallel._watch_parent), so they stop too."""
-    import sys
+def watch_parent(pid):
+    """Exit when process pid is gone: the plugin passes KiCad's own, so when KiCad exits,
+    crashed or not, the routing stops instead of running on for nobody. The workers
+    watch this process in turn (parallel._watch_parent), so they stop too. (Not by
+    reading a pipe from KiCad: on Windows a thread blocked reading one stalls the rest
+    of the process.)"""
     import threading
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        h = k32.OpenProcess(0x00100000, False, pid)        # SYNCHRONIZE
+        if not h:
+            return
+        gone = lambda: k32.WaitForSingleObject(h, 0) == 0  # WAIT_OBJECT_0: it has exited
+    else:
+        gone = lambda: os.getppid() != pid                 # orphans get a new parent
 
     def watch():
-        try:                                       # the raw fd: sys.stdin's buffer takes a
-            fd = sys.stdin.fileno()                # lock that Python's exit would wait on
-            while os.read(fd, 4096):
-                pass
-        except Exception:
-            pass
+        while not gone():
+            time.sleep(1.0)
         os._exit(1)
     threading.Thread(target=watch, daemon=True).start()
 
@@ -40,11 +48,11 @@ def main(argv=None):
     ap.add_argument("--tries", type=int, default=len(cli.SETUPS))
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--no-suggest", action="store_true")
-    ap.add_argument("--watch-stdin", action="store_true",
-                    help="stop when stdin closes: the plugin holds it open, so KiCad gone = stop")
+    ap.add_argument("--parent-pid", type=int, metavar="PID",
+                    help="stop when this process (KiCad) is gone")
     a = ap.parse_args(argv)
-    if a.watch_stdin:
-        watch_stdin()
+    if a.parent_pid:
+        watch_parent(a.parent_pid)
     log = lambda m: print(m, flush=True)
 
     t0 = time.time()
