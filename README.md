@@ -104,6 +104,7 @@ Then:
 ./trouting.py board.kicad_pcb -o routed.kicad_pcb  # write somewhere else
 ./trouting.py board.kicad_pcb --keep-tracks        # keep the tracks already there, route the rest
 ./trouting.py board.kicad_pcb --png routed.png     # also draw the result: front red, back blue, vias white
+./trouting.py board.kicad_pcb --plane-cost 1000    # keep signal tracks off the plane layers where it can
 ```
 
 On Windows, run it as `python trouting.py …`. On macOS, `python3 trouting.py …`

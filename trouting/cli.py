@@ -5,6 +5,7 @@ examples:
   trouting board.kicad_pcb -o routed.kicad_pcb  write the result somewhere else
   trouting board.kicad_pcb --keep-tracks        keep the existing tracks, route the rest
   trouting board.kicad_pcb --png routed.png     also draw the result
+  trouting board.kicad_pcb --plane-cost 1000    keep signal tracks off the plane layers where it can
 
 Close the board in KiCad first (or reload it after). Several router setups run
 at once and the best result is kept: fewest unrouted connections, then fewest
@@ -192,10 +193,19 @@ def fit_jobs(jobs, n_items, log):
     return n
 
 
-def route_portfolio(board_json, tries, jobs, log, png_dir=None, minutes="default"):
+def portfolio(tries, plane_cost=None):
+    """The first tries setups. plane_cost: one plane layer cost for all of them
+    instead of each setup's own, which leaves the different via costs."""
+    if plane_cost is None:
+        return SETUPS[:tries]
+    return [(v, plane_cost) for v in dict.fromkeys(v for v, _ in SETUPS)][:tries]
+
+
+def route_portfolio(board_json, tries, jobs, log, png_dir=None, minutes="default", plane_cost=None):
     """Route the board with tries setups, jobs at a time; the best result. minutes:
     the time they get all together (each stops when it's up and keeps its best
-    try; "default": DEFAULT_MINUTES, None or 0: no limit)."""
+    try; "default": DEFAULT_MINUTES, None or 0: no limit). plane_cost: the cost of
+    a track on a plane layer, for every setup (None: each setup's own)."""
     t = time.time()
     if minutes == "default":
         minutes = DEFAULT_MINUTES
@@ -207,7 +217,7 @@ def route_portfolio(board_json, tries, jobs, log, png_dir=None, minutes="default
         sizes = sorted({v for _, v in _BOARD.fanout_via.values()})
         log("  %d nets on fine-pitch pins take the board's smaller via size (%s)"
             % (len(_BOARD.fanout_via), ", ".join("%g/%g mm" % s for s in sizes)))
-    setups = SETUPS[:tries]
+    setups = portfolio(tries, plane_cost)
     from .parallel import Timeout, pmap
     results = []
     deadline = [None]
@@ -248,11 +258,17 @@ def main(argv=None):
     ap.add_argument("--max-minutes", type=float, metavar="M",
                     help="time the routing gets, all setups together: when it's up, each setup "
                          "keeps its best try (default: no limit)")
+    ap.add_argument("--plane-cost", type=float, metavar="C",
+                    help="what a track on a plane layer costs, against 1 on a signal layer, in every "
+                         "setup (default: 1.0 to 2.5, by setup). A high cost such as 1000 keeps "
+                         "the planes whole: a net goes there only when it has no other way")
     ap.add_argument("--no-suggest", action="store_true",
                     help="if the board doesn't route fully, don't look for parts to move or rotate")
     ap.add_argument("--png", metavar="FILE",
                     help="also draw the routed board to this PNG: front tracks red, back blue, vias white")
     a = ap.parse_args(argv)
+    if a.plane_cost is not None and a.plane_cost < 1:
+        ap.error("--plane-cost is at least 1, what a track on a signal layer costs")
     log = lambda m: print(m, flush=True)
 
     src = os.path.abspath(a.board)
@@ -276,7 +292,7 @@ def main(argv=None):
         before, before_unc = drc(cli, w_src, work, "before")
 
         best = route_portfolio(j, a.tries, a.jobs, log, work if a.png else None,
-                               "default" if a.max_minutes is None else a.max_minutes)
+                               "default" if a.max_minutes is None else a.max_minutes, a.plane_cost)
         routes = os.path.join(work, "routes.json")
         with open(routes, "w", encoding="utf-8") as fh:
             json.dump(best["out"], fh)
