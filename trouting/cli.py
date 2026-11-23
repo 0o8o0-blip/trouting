@@ -177,6 +177,21 @@ def _init_route(board_json, png_dir, until=None):
 _BOARD_FROM = None
 
 
+def fit_jobs(jobs, n_items, log):
+    """jobs, cut to the workers that fit in free memory for the board read last: a
+    worker needs about 50 bytes per grid cell per layer (measured), a spawned one
+    (Windows, macOS) the board read again on top."""
+    from .parallel import fit_jobs as fit, use_fork
+    b = _BOARD
+    each = 50 * b.W * b.H * b.L * (1 if use_fork() else 2) + (50 << 20)
+    want = max(1, min(jobs, n_items))
+    n, free = fit(want, each)
+    if n < want:
+        log("  %d at a time instead of %d: each needs about %d MB and %d MB of memory is free"
+            % (n, want, each >> 20, free >> 20))
+    return n
+
+
 def route_portfolio(board_json, tries, jobs, log, png_dir=None, minutes="default"):
     """Route the board with tries setups, jobs at a time; the best result. minutes:
     the time they get all together (each stops when it's up and keeps its best
@@ -188,13 +203,17 @@ def route_portfolio(board_json, tries, jobs, log, png_dir=None, minutes="default
     _init_route(board_json, png_dir, until)
     log("board read: %d x %d cells x %d layers, %d nets to join (%.1fs)"
         % (_BOARD.W, _BOARD.H, _BOARD.L, sum(1 for ts in _BOARD.terminals.values() if len(ts) > 1), time.time() - t))
+    if _BOARD.fanout_via:
+        sizes = sorted({v for _, v in _BOARD.fanout_via.values()})
+        log("  %d nets on fine-pitch pins take the board's smaller via size (%s)"
+            % (len(_BOARD.fanout_via), ", ".join("%g/%g mm" % s for s in sizes)))
     setups = SETUPS[:tries]
     from .parallel import Timeout, pmap
     results = []
     deadline = [None]
     try:
         # forked workers share the board read above; spawned ones read it again
-        for res in pmap(_route, setups, min(jobs, len(setups)), deadline=lambda: deadline[0],
+        for res in pmap(_route, setups, fit_jobs(jobs, len(setups), log), deadline=lambda: deadline[0],
                         init=_init_route, initargs=(board_json, png_dir, until)):
             log("  setup via %4.1f, plane %.1f: %2d unrouted, %3d vias, %6.0f mm  (%d rounds, %.0fs%s)"
                 % (res["setup"] + (res["unrouted"], res["vias"], res["length"], res["rounds"], res["secs"],
@@ -285,7 +304,7 @@ def main(argv=None):
             planes = {_BOARD.net_names[n] for n in _BOARD.planes}
             budget = max(60.0, 2.0 * best["secs"])
             sugg = suggest(_BOARD.d, planes, best["out"]["unrouted"], best["hot_all"], best["setup"],
-                           a.jobs, log, res=_BOARD.res, budget=budget)
+                           fit_jobs(a.jobs, a.jobs, log), log, res=_BOARD.res, budget=budget)
 
         # report
         u = best["out"]["unrouted"]

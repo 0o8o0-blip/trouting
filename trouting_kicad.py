@@ -24,6 +24,16 @@ import pcbnew
 EPS = pcbnew.FromMM(0.002)      # polygon approximation error for round shapes
 
 
+def say(msg):
+    """A progress line for the terminal. Inside KiCad's own process stdout may be a
+    terminal that has since been closed (KiCad started from one and left running):
+    writing there fails, and a message is never worth failing a route for."""
+    try:
+        print(msg, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def mm(v):
     return round(v / 1e6, 5)
 
@@ -130,6 +140,15 @@ def net_rules(board):
     return out
 
 
+def via_sizes(ds):
+    """[diameter, drill] (mm) of each predefined via size; [] if they can't be read."""
+    try:
+        return [[mm(v.m_Diameter), mm(v.m_Drill)] for v in ds.m_ViasDimensionsList
+                if v.m_Diameter > 0 and v.m_Drill > 0]
+    except Exception:
+        return []
+
+
 def is_unlocked_copper(t):
     return not t.IsLocked()
 
@@ -146,9 +165,12 @@ def dump(board, path, rip_up):
             "min_connection": mm(getattr(ds, "m_MinConn", 0)),
             "min_via_d": mm(ds.m_ViasMinSize),
             "min_via_drill": mm(ds.m_MinThroughDrill),
+            "min_via_annular": mm(getattr(ds, "m_ViasMinAnnularWidth", 0)),
             "hole_clearance": mm(ds.m_HoleClearance),
             "hole_to_hole": mm(ds.m_HoleToHoleMin),
             "edge_clearance": mm(ds.m_CopperEdgeClearance),
+            # the board's predefined via sizes (Board Setup > Pre-defined Sizes)
+            "via_sizes": via_sizes(ds),
         },
         "nets": net_rules(board),
         "pads": [], "holes": [], "keepouts": [], "pours": [],
@@ -277,7 +299,7 @@ def dump(board, path, rip_up):
     d["footprints"].sort(key=lambda e: e["ref"])
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(d, fh)
-    print("dumped %d copper layers, %d footprints, %d pads, %d nets, %d tracks, %d vias%s"
+    say("dumped %d copper layers, %d footprints, %d pads, %d nets, %d tracks, %d vias%s"
           % (len(names), len(d["footprints"]), len(d["pads"]), len(d["nets"]),
              len(d["tracks"]), len(d["vias"]), " (NO board outline, using bounding box)" if d.get("outline_missing") else ""))
 
@@ -298,7 +320,7 @@ def fills(board, path):
                                       for h in (fp.Hole(i, j) for j in range(fp.HoleCount(i)))]})
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(out, fh)
-    print("%d filled pieces" % len(out))
+    say("%d filled pieces" % len(out))
 
 
 def apply(board, path, out, rip_up):
@@ -306,7 +328,7 @@ def apply(board, path, out, rip_up):
         r = json.load(fh)
     apply_routes(board, r, rip_up)
     board.Save(out)
-    print("applied %d tracks, %d vias -> %s" % (len(r["tracks"]), len(r["vias"]), out), flush=True)
+    say("applied %d tracks, %d vias -> %s" % (len(r["tracks"]), len(r["vias"]), out))
 
 
 def apply_routes(board, r, rip_up):
@@ -361,5 +383,8 @@ if __name__ == "__main__":
         sys.exit(__doc__)
     # KiCad's bindings can crash while Python tears them down at exit; the work is
     # saved by now, so leave without the teardown.
-    sys.stdout.flush()
+    try:
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        pass
     os._exit(0)

@@ -158,6 +158,7 @@ class Router:
             self.nets.append(n)
         self.own = {n: np.unique(np.concatenate([t["own"] for t in b.terminals[n]])) for n in self.nets}
         self.novia = {n: np.unique(np.concatenate([t["novia"] for t in b.terminals[n]])) for n in self.nets}
+        self.via_pads = self.exposed_pads()
         # where a narrowed track lies inside its own copper
         self.own2 = {}
         for n in self.nets:
@@ -254,43 +255,76 @@ class Router:
         """Cells near net n's pads from which a track of width w can't get out (fixed
         copper all round, as between fine-pitch pins): within fanout_mm of them, on
         their layers. None if every pad lets the full width out."""
-        b = self.b
-        thr, R = w / 2 + MARGIN, self.o.fanout_mm
-        eight = np.ones((3, 3), bool)
+        b, R = self.b, self.o.fanout_mm
         out = []
         for t in b.terminals.get(n, []):
             for it in t["items"]:
-                if it["kind"] != "pad":
-                    continue
-                escapes = False
-                for l, g in it["geoms"].items():
-                    gx0, gy0, gx1, gy1 = g.bounds
-                    xa, ya = b.to_cell(gx0 - R, gy0 - R)
-                    xb, yb = b.to_cell(gx1 + R, gy1 + R)
-                    xa, ya, xb, yb = max(xa, 0), max(ya, 0), min(xb, b.W - 1), min(yb, b.H - 1)
-                    h, wd = yb - ya + 1, xb - xa + 1
-                    ys, xs = np.mgrid[ya:yb + 1, xa:xb + 1]
-                    ok = (b.static_d(n, (l * b.WH + ys * b.W + xs).ravel()) >= thr).reshape(h, wd)
-
-                    def local(cells):
-                        m = np.zeros((h, wd), bool)
-                        xy = cells - l * b.WH
-                        yy, xx = xy // b.W - ya, xy % b.W - xa
-                        sel = (yy >= 0) & (yy < h) & (xx >= 0) & (xx < wd)
-                        m[yy[sel], xx[sel]] = True
-                        return m
-                    ok |= local(b.cells_in(g, l, shrink=w / 2))      # its own copper
-                    start = local(b.cells_in(g, l)) & ok
-                    if not start.any():
-                        continue
-                    lab, _ = ndimage.label(ok, structure=eight)
-                    border = set(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]).tolist()) - {0}
-                    if border & set(lab[start].tolist()):
-                        escapes = True
-                        break
-                if not escapes:
+                if it["kind"] == "pad" and not self.pad_escapes(n, it, w):
                     out += [b.cells_in(g.buffer(R), l) for l, g in it["geoms"].items()]
         return np.unique(np.concatenate(out)).astype(np.int32) if out else None
+
+    def pad_escapes(self, n, it, w):
+        """Can a track of width w get from pad item it (net n) to fanout_mm away from
+        it, past the fixed copper around it, on one of its layers?"""
+        b = self.b
+        thr, R = w / 2 + MARGIN, self.o.fanout_mm
+        eight = np.ones((3, 3), bool)
+        for l, g in it["geoms"].items():
+            gx0, gy0, gx1, gy1 = g.bounds
+            xa, ya = b.to_cell(gx0 - R, gy0 - R)
+            xb, yb = b.to_cell(gx1 + R, gy1 + R)
+            xa, ya, xb, yb = max(xa, 0), max(ya, 0), min(xb, b.W - 1), min(yb, b.H - 1)
+            h, wd = yb - ya + 1, xb - xa + 1
+            ys, xs = np.mgrid[ya:yb + 1, xa:xb + 1]
+            ok = (b.static_d(n, (l * b.WH + ys * b.W + xs).ravel()) >= thr).reshape(h, wd)
+
+            def local(cells):
+                m = np.zeros((h, wd), bool)
+                xy = cells - l * b.WH
+                yy, xx = xy // b.W - ya, xy % b.W - xa
+                sel = (yy >= 0) & (yy < h) & (xx >= 0) & (xx < wd)
+                m[yy[sel], xx[sel]] = True
+                return m
+            ok |= local(b.cells_in(g, l, shrink=w / 2))      # its own copper
+            start = local(b.cells_in(g, l)) & ok
+            if not start.any():
+                continue
+            lab, _ = ndimage.label(ok, structure=eight)
+            border = set(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]).tolist()) - {0}
+            if border & set(lab[start].tolist()):
+                return True
+        return False
+
+    def exposed_pads(self):
+        """An exposed pad (a big SMD pad in the middle of its part's other pads, as
+        under a QFN) that no track can leave, even at the narrowest width, between the
+        pins around it: its net's vias may go inside it, well clear of its edge, as
+        people route those. {net: [pad names]}; their inside is taken off the net's
+        no-via cells."""
+        b = self.b
+        ring = {}
+        for p in b.d["pads"]:
+            ring.setdefault(p["ref"], []).append((p["num"], p["at"]))
+        out = {}
+        min_track = b.d["rules"].get("min_track") or 0.0
+        for n in self.nets:
+            vd = b.net_rule[n]["via_d"]
+            w = min(b.net_rule[n]["width"], min_track) if min_track > 0 else b.net_rule[n]["width"]
+            for t in b.terminals[n]:
+                for it in t["items"]:
+                    if it["kind"] != "pad" or it["pth"] or len(it["geoms"]) != 1:
+                        continue
+                    ref, num = it["name"].rsplit(".", 1)
+                    others = [at for nm, at in ring.get(ref, []) if nm != num]
+                    if len(others) < 3 or not shapely.MultiPoint(others).convex_hull.contains(shapely.Point(it["at"])):
+                        continue
+                    (l, g), = it["geoms"].items()
+                    inner = b.cells_in(g, l, shrink=vd)     # the via's centre a via diameter inside
+                    if not len(inner) or self.pad_escapes(n, it, w):
+                        continue
+                    self.novia[n] = np.setdiff1d(self.novia[n], inner).astype(self.novia[n].dtype)
+                    out.setdefault(n, []).append(it["name"])
+        return out
 
     def reserve_spokes(self):
         """Per thermal pad, the spokes that can land (the pour is there to land on)

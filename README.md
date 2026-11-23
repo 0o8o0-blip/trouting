@@ -68,7 +68,9 @@ The Intel Mac build is made but not tested.
 
 It routes 12 setups at once and keeps the best, so it is quicker the more cores
 you have: the stuck demo below, suggestions included, takes about 7 minutes on
-12 cores and over 20 on 4. It takes as long as it needs; `--max-minutes M`
+12 cores and over 20 on 4. It runs no more setups at once than fit in the free
+memory (each needs a few hundred MB on a typical board), so it won't push the
+machine into swap. It takes as long as it needs; `--max-minutes M`
 stops it after M minutes, when each setup keeps its best try and the nets it
 couldn't route are listed.
 
@@ -202,7 +204,7 @@ What it doesn't do yet:
 - **Escaping fine-pitch chips** (QFP, BGA) on dense boards: where many pins have to get out
   from under one chip, it can leave a few of them unrouted.
 - **Big, dense boards can take hours.** A 4-layer board with 1151 pads and two fine-pitch chips
-  still had about 30 connections unrouted after 3 hours.
+  still had 11 connections unrouted after 3 hours.
 - **Pours on nets other than the plane net** (a +3V3 pour, say) aren't
   modelled, so they can be left with isolated copper.
 - **Differential pairs and length matching** are not supported.

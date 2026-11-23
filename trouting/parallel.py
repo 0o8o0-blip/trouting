@@ -48,6 +48,51 @@ def _spawn_init(init, initargs):
         init(*initargs)
 
 
+def free_memory():
+    """Bytes of RAM free for new work without swapping (what the system could hand
+    out now), or None when it can't be told."""
+    try:
+        if sys.platform.startswith("linux"):
+            with open("/proc/meminfo") as fh:
+                for line in fh:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) * 1024
+        elif sys.platform == "darwin":
+            import re
+            import subprocess
+            out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=10).stdout
+            page = int(re.search(r"page size of (\d+)", out).group(1))
+            pages = sum(int(m.group(1)) for k in ("Pages free", "Pages inactive", "Pages speculative")
+                        for m in [re.search(k + r":\s+(\d+)", out)] if m)
+            return pages * page
+        elif os.name == "nt":
+            import ctypes
+
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            m = MemoryStatus()
+            m.dwLength = ctypes.sizeof(m)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+                return m.ullAvailPhys
+    except Exception:
+        pass
+    return None
+
+
+def fit_jobs(jobs, each):
+    """How many workers needing `each` bytes apiece to run at once: at most jobs, and
+    no more than fit in 70% of the free RAM (at least 1), so routing never pushes
+    the machine into swap. Returns (workers, free bytes or None)."""
+    free = free_memory()
+    if not free or each <= 0:
+        return max(1, jobs), free
+    return max(1, min(jobs, int(0.7 * free // each))), free
+
+
 def use_fork():
     return hasattr(os, "fork") and sys.platform != "darwin" and not os.environ.get("TROUTING_SPAWN")
 

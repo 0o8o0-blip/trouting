@@ -55,6 +55,7 @@ class Board:
               "via_drill": rules.get("min_via_drill") or 0.0, "clearance": rules.get("min_clearance") or 0.0}
         self.net_rule = [dict(d["nets"][n], **{k: max(d["nets"][n][k], v) for k, v in lo.items()
                                                 if k in d["nets"][n]}) for n in self.net_names]
+        self.fanout_via = self.small_vias(rules)
         clrs = [r["clearance"] for r in self.net_rule] or [0.2]
         self.c_ref = min(clrs)
         self.clrs = sorted(set(clrs))                 # the clearance classes
@@ -81,6 +82,38 @@ class Board:
         self.build_static()
         self.find_planes()
         self.build_terminals()
+
+    def small_vias(self, rules):
+        """Nets with a pin on a fine-pitch part (pins closer than the net's via and its
+        clearance: its vias can't stand one per pin) take the board's smallest
+        predefined via size instead of their class's, as people route such parts; not
+        under the board's minimums (its annular ring included). {net: (class via, via taken)}."""
+        sizes = [(dv, dr) for dv, dr in rules.get("via_sizes") or []
+                 if dv >= (rules.get("min_via_d") or 0.0) and dr >= (rules.get("min_via_drill") or 0.0)
+                 and (dv - dr) / 2 >= (rules.get("min_via_annular") or 0.0) - 1e-6]
+        if not sizes:
+            return {}
+        small = min(sizes)
+        per_fp = {}
+        for p in self.d["pads"]:
+            per_fp.setdefault(p["ref"], []).append(p)
+        out = {}
+        for pads in per_fp.values():
+            if len(pads) < 2:
+                continue
+            at = np.array([p["at"] for p in pads], float)
+            dist = np.hypot(at[:, None, 0] - at[None, :, 0], at[:, None, 1] - at[None, :, 1])
+            np.fill_diagonal(dist, np.inf)
+            pitch = dist.min(axis=1)
+            for p, pt in zip(pads, pitch):
+                n = self.ni.get(p["net"]) if p["net"] else None
+                if n is None or n in out:
+                    continue
+                r = self.net_rule[n]
+                if pt < r["via_d"] + r["clearance"] and small[0] < r["via_d"]:
+                    out[n] = ((r["via_d"], r["via_drill"]), small)
+                    r["via_d"], r["via_drill"] = small
+        return out
 
     # ---- coordinates ----
     def cx(self, x):            # cell x -> mm
